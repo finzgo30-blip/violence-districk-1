@@ -1598,6 +1598,10 @@ State.TOF = {
 	Smooth = 50,
 	Predict = 12,
 	Vis = true,
+	Aimlock = true,
+	SilentAim = false,
+	SilentFOV = 120,
+	SilentPredict = false,
 }
 
 State.TOFObj = (function()
@@ -1695,7 +1699,7 @@ State.TOFObj = (function()
 
 	local function step()
 		if unloaded or not T.Enabled then return end
-		if not holding then return hideLaser() end
+		if not T.Aimlock or not holding then return hideLaser() end
 		local cam = workspace.CurrentCamera
 		local target = closest()
 		if not cam or not target then return hideLaser() end
@@ -1762,7 +1766,132 @@ end)()
 
 Hooks.TOF = function(s)
 	State.TOFObj:SetEnabled(s.Enabled)
+	State.SilentObj:Refresh()
 end
+
+State.SilentObj = (function()
+	local T = State.TOF
+	local obj = {}
+	local effects, original
+	local installing = false
+
+	local function killerChar()
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LP and p.Character then
+				local team = p.Team and string.lower(p.Team.Name) or ""
+				if string.find(team, "killer", 1, true) or p.Character:FindFirstChild("Lookscriptkiller", true) then
+					return p.Character
+				end
+			end
+		end
+		return nil
+	end
+
+	local function targetPart(ch)
+		return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
+	end
+
+	local function skinModel()
+		local ch = LP.Character
+		local tool = ch and ch:FindFirstChild("Twist of Fate")
+		local arm = tool and tool:FindFirstChild("Right Arm")
+		if not arm then return nil end
+		for _, c in ipairs(arm:GetChildren()) do
+			if c:IsA("Model") then return c end
+		end
+		return nil
+	end
+
+	local function muzzle(ch)
+		local skin = skinModel()
+		if skin then
+			local smoke = skin:FindFirstChild("SmokePart", true)
+			if smoke and smoke:IsA("BasePart") then return smoke.Position end
+			local barrel = skin:FindFirstChild("barrel", true)
+			if barrel and barrel:IsA("BasePart") then return barrel.Position end
+			if skin.PrimaryPart then return skin.PrimaryPart.Position end
+		end
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if hrp then return (hrp.CFrame * CFrame.new(0.7, 1.373, -2.5)).Position end
+		return nil
+	end
+
+	local function aimPoint(part, from)
+		local pos = part.Position
+		if not T.SilentPredict then return pos end
+		local vel = part.AssemblyLinearVelocity
+		if vel.Magnitude < 1 then return pos end
+		local t = (pos - from).Magnitude / 800
+		local future = pos
+		for _ = 1, 3 do
+			future = pos + vel * t
+			t = (future - from).Magnitude / 800
+		end
+		return future
+	end
+
+	local function inFov(pos)
+		local cam = workspace.CurrentCamera
+		if not cam then return false end
+		local to = pos - cam.CFrame.Position
+		if to.Magnitude < 0.1 then return true end
+		local dot = math.clamp(cam.CFrame.LookVector:Dot(to.Unit), -1, 1)
+		return math.deg(math.acos(dot)) <= (tonumber(T.SilentFOV) or 120) / 2
+	end
+
+	local function compute(character)
+		local kc = killerChar()
+		local part = kc and targetPart(kc)
+		if not part then return nil end
+		local from = muzzle(character)
+		if not from then return nil end
+		local pos = aimPoint(part, from)
+		if not inFov(pos) then return nil end
+		local d = pos - from
+		if d.Magnitude < 0.01 then return nil end
+		return d.Unit
+	end
+
+	local function restore()
+		if effects and original then
+			pcall(function() effects.aimDirection = original end)
+		end
+	end
+
+	local function install()
+		if original or installing then return end
+		installing = true
+		task.spawn(function()
+			local ok = pcall(function()
+				local rs = game:GetService("ReplicatedStorage")
+				local m = rs:WaitForChild("Modules", 10):WaitForChild("Items", 10):WaitForChild("TwistOfFate", 10):WaitForChild("TwistoffateEffects", 10)
+				local e = require(m)
+				local orig = e.aimDirection
+				if type(orig) ~= "function" then error("no aimDirection") end
+				e.aimDirection = function(character, camCF)
+					if unloaded or not (T.Enabled and T.SilentAim) then return orig(character, camCF) end
+					local good, dir = pcall(compute, character)
+					if good and dir then return dir end
+					return orig(character, camCF)
+				end
+				effects, original = e, orig
+			end)
+			installing = false
+			if ok and unloaded then restore() end
+		end)
+	end
+
+	function obj:Refresh()
+		if T.Enabled and T.SilentAim then install() end
+	end
+
+	function obj:Destroy()
+		T.SilentAim = false
+		restore()
+	end
+
+	return obj
+end)()
 
 State.AimFlash = { Enabled = false, Range = 120, AimPart = "Head", Smooth = 35, ShowLaser = true }
 
@@ -2762,6 +2891,7 @@ end)()
 
 Hooks.CameraSettings = function(s)
 	State.CameraObj:Sync()
+	if State.HighCamObj then State.HighCamObj:Refresh() end
 end
 
 State.PerfObj = (function()
@@ -3103,9 +3233,6 @@ State.PerfObj = (function()
 			}
 			inst.Transparency = 1
 			inst.CastShadow = false
-			inst.CanCollide = false
-			inst.CanQuery = false
-			inst.CanTouch = false
 		elseif inst:IsA("Decal") or inst:IsA("Texture") then
 			if not isFoliage(self, inst) then return end
 			saved[inst] = { kind = "decal", t = inst.Transparency }
@@ -3917,41 +4044,6 @@ local function KINON_TryFallbackParry()
 	return fired
 end
 
-local function KINON_PreserveFacingAtParry()
-	local character = LP.Character
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if not root or not humanoid then return nil end
-	local originalAutoRotate = humanoid.AutoRotate
-	pcall(function() humanoid.AutoRotate = false end)
-	local lockRotation = root.CFrame.Rotation
-	local lockConn
-	do
-		lockConn = RunService.Heartbeat:Connect(function()
-			if not root.Parent or unloaded then return end
-			pcall(function()
-				root.CFrame = CFrame.new(root.Position) * lockRotation
-				root.AssemblyAngularVelocity = Vector3.zero
-			end)
-		end)
-	end
-	local function stopLock()
-		if lockConn then lockConn:Disconnect(); lockConn = nil end
-	end
-	task.delay(1.2, stopLock)
-	local restored = false
-	return function(_parrySucceeded)
-		if restored then return end
-		restored = true
-		task.delay(0.4, function()
-			stopLock()
-			if humanoid and humanoid.Parent and character == LP.Character then
-				pcall(function() humanoid.AutoRotate = originalAutoRotate end)
-			end
-		end)
-	end
-end
-
 local KINON_Busy = { HoldingPrompt = false, HoldSince = 0, UntilTime = 0 }
 do
 	local PPS = game:GetService("ProximityPromptService")
@@ -4049,7 +4141,7 @@ local function KINON_TryParry(reason, killerRoot)
 	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.10 then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
-	local restoreFacing = KINON_PreserveFacingAtParry()
+	local restoreFacing = nil
 
 	if client then
 		local ok, result = pcall(function()
@@ -4105,7 +4197,7 @@ local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, 
 				local okPing, value = pcall(function() return LP:GetNetworkPing() end)
 				if okPing and type(value) == "number" then ping = value end
 
-				extra = math.clamp(closing * (ping * 2 + 0.22), 0, 34)
+				extra = math.clamp(closing * ping, 0, 3)
 			end
 		end)
 		range = range + extra
@@ -4120,6 +4212,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 	local animationId = KINON_AnimationId(animTrack)
 	if animationId == "" or KINON_IgnoredParryAnimationIds[animationId] then return end
 	if VD_NO_PARRY_ANIMS[animationId] then return end
+	if not VD_OPTIONAL_ATTACK_ANIMS[animationId] and not KINON_IsKillerModel(model) then return end
 
 	local modelName = string.lower(tostring(model.Name or ""))
 	if modelName:find("veil", 1, true) then
@@ -4138,8 +4231,9 @@ local function KINON_HandleAttackTrack(animTrack, model)
 		or (optionalAttack ~= nil and optionalAttack.Default == true)
 	if not knownAttack then return end
 
+	local windowT = optionalAttack and 1.2 or 0.45
 	local okTime, timePosition = pcall(function() return animTrack.TimePosition or 0 end)
-	if okTime and timePosition > 0.45 then return end
+	if okTime and timePosition > windowT then return end
 
 	task.spawn(function()
 		local startTime = tick()
@@ -4148,7 +4242,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 			if unloaded or not Parry.Enabled or not animTrack.IsPlaying then break end
 			local currentTime = 0
 			pcall(function() currentTime = animTrack.TimePosition or 0 end)
-			if currentTime > 0.45 then break end
+			if currentTime > windowT then break end
 			local playerRoot = getRoot()
 			local killerRoot = model:FindFirstChild("HumanoidRootPart")
 			if killerRoot then
@@ -4160,11 +4254,19 @@ local function KINON_HandleAttackTrack(animTrack, model)
 				end
 				lastPos, lastT = pos, nowT
 			end
-			if playerRoot and killerRoot and KINON_InRangeAndFacing(killerRoot, playerRoot, nil, vel) then
-				if KINON_TryParry("Animation " .. animationId, killerRoot) then return end
+			if playerRoot and killerRoot then
+				local hit = KINON_InRangeAndFacing(killerRoot, playerRoot, nil, vel)
+				if not hit and optionalAttack and vel then
+					local ping = 0.05
+					local okPing, value = pcall(function() return LP:GetNetworkPing() end)
+					if okPing and type(value) == "number" then ping = value end
+					local lead = math.clamp(ping + 0.1, 0.08, 0.35)
+					hit = KINON_InRangeAndFacing(killerRoot, playerRoot, killerRoot.Position + vel * lead, vel)
+				end
+				if hit and KINON_TryParry("Animation " .. animationId, killerRoot) then return end
 			end
 			RunService.Heartbeat:Wait()
-		until tick() - startTime >= 0.45
+		until tick() - startTime >= windowT
 	end)
 end
 
@@ -4204,7 +4306,7 @@ track(Players.PlayerAdded:Connect(function(player)
 	if player == LP then return end
 	track(player.CharacterAdded:Connect(function(character)
 		task.defer(function()
-			if character and KINON_IsKillerModel(character) then KINON_HookKillerModel(character) end
+			if character then KINON_HookKillerModel(character) end
 		end)
 	end))
 end))
@@ -4212,7 +4314,7 @@ for _, player in ipairs(Players:GetPlayers()) do
 	if player ~= LP then
 		track(player.CharacterAdded:Connect(function(character)
 			task.defer(function()
-				if character and KINON_IsKillerModel(character) then KINON_HookKillerModel(character) end
+				if character then KINON_HookKillerModel(character) end
 			end)
 		end))
 	end
@@ -4228,6 +4330,9 @@ task.spawn(function()
 				KINON_ParryEngine.WarnedMissingTool = false
 			end
 			local playerRoot = getRoot()
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LP and plr.Character then pcall(KINON_HookKillerModel, plr.Character) end
+			end
 			for _, model in ipairs(KINON_GetKillerModels()) do
 				pcall(KINON_HookKillerModel, model)
 				local killerRoot = model:FindFirstChild("HumanoidRootPart")
@@ -5885,24 +5990,39 @@ end
 
 do
 	local s = State.TOF
-	local card = addCard(9, "crosshair", "Aimlock Twist of Fate", "Hold M2 / gun button to lock camera", "TOF")
-	addDropdown(card, "Target Mode", "user", { "Killer", "Survivor" },
+	local card = addCard(9, "crosshair", "Twist of Fate", "Aimlock and Silent Aim", "TOF")
+	addCheckbox(card, "Aimlock", "crosshair",
+		function() return s.Aimlock end,
+		function(v) s.Aimlock = v end)
+	addCheckbox(card, "Silent Aim", "eye",
+		function() return s.SilentAim end,
+		function(v)
+			s.SilentAim = v
+			State.SilentObj:Refresh()
+		end)
+	addCheckbox(card, "Silent Predict Move", "move",
+		function() return s.SilentPredict end,
+		function(v) s.SilentPredict = v end)
+	addSlider(card, "Silent Aim FOV", "ruler", 10, 360,
+		function() return math.clamp(math.floor(tonumber(s.SilentFOV) or 120), 10, 360) end,
+		function(v) s.SilentFOV = v end)
+	addDropdown(card, "Aimlock Target Mode", "user", { "Killer", "Survivor" },
 		function(v) return v end,
 		function() return s.TargetMode or "Killer" end,
 		function(v) s.TargetMode = v end)
-	addSlider(card, "FOV Radius", "ruler", 50, 1000,
+	addSlider(card, "Aimlock FOV Radius", "ruler", 50, 1000,
 		function() return math.clamp(math.floor(tonumber(s.FOV) or 250), 50, 1000) end,
 		function(v) s.FOV = v end)
-	addSlider(card, "Aim Smoothness %", "gauge", 5, 100,
+	addSlider(card, "Aimlock Smoothness %", "gauge", 5, 100,
 		function() return math.clamp(math.floor(tonumber(s.Smooth) or 50), 5, 100) end,
 		function(v) s.Smooth = v end)
-	addSlider(card, "Prediction Strength %", "move", 0, 100,
+	addSlider(card, "Aimlock Prediction %", "move", 0, 100,
 		function() return math.clamp(math.floor(tonumber(s.Predict) or 12), 0, 100) end,
 		function(v) s.Predict = v end)
 	addCheckbox(card, "Visibility Check", "eye",
 		function() return s.Vis end,
 		function(v) s.Vis = v end)
-	addCheckbox(card, "Show Laser", "scan-line",
+	addCheckbox(card, "Aimlock Laser", "scan-line",
 		function() return s.ShowLaser end,
 		function(v) s.ShowLaser = v end)
 end
@@ -6085,9 +6205,188 @@ do
 		return true
 	end
 
-	local function descApply(id, humanoid)
-		local ok, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(id) end)
-		if not ok or not desc then return false end
+	local origDesc = nil
+
+	local ours = {}
+	local hornOn = {}
+	local hornObjs = {}
+
+	local function isKillerNow()
+		if LP.Team ~= nil and string.find(string.lower(LP.Team.Name), "killer", 1, true) ~= nil then return true end
+		local ch = LP.Character
+		return ch ~= nil and ch:GetAttribute("MorphedKiller") ~= nil
+	end
+
+	local function markOurs()
+		ours = {}
+		local ch = LP.Character
+		if not ch then return end
+		for _, c in ipairs(ch:GetChildren()) do
+			if c:IsA("Accessory") then ours[c] = true end
+		end
+	end
+
+	local function clearHorn(name)
+		local list = hornObjs[name]
+		if list then
+			for _, obj in ipairs(list) do
+				pcall(function() if obj and obj.Parent then obj:Destroy() end end)
+			end
+		end
+		hornObjs[name] = nil
+	end
+
+	local function stripForKiller()
+		for acc in pairs(ours) do
+			pcall(function() if acc.Parent then acc:Destroy() end end)
+		end
+		ours = {}
+		for name in pairs(hornObjs) do clearHorn(name) end
+	end
+
+	local HORNS = {
+		["Poisoned Horns of the Toxic Wasteland"] = { AssetId = 1744060292, MeshId = "215680403", TextureId = "1744057070" },
+		["Fiery Horns of the Netherworld"] = { AssetId = 215718515, MeshId = "215680403", TextureId = "215676264" },
+		["Frozen Horns of the Frozen Tundra"] = { AssetId = 74891470, MeshId = "215680403", TextureId = "658646189" },
+	}
+	local HORN_ORDER = {
+		"Poisoned Horns of the Toxic Wasteland",
+		"Fiery Horns of the Netherworld",
+		"Frozen Horns of the Frozen Tundra",
+	}
+
+	local function applyHorn(name)
+		clearHorn(name)
+		local data = HORNS[name]
+		local character = LP.Character
+		if not data or not character or isKillerNow() then return false end
+		local attached = {}
+
+		local function attach(source)
+			local sh = source:FindFirstChild("Handle")
+			if not sh or not sh:IsA("BasePart") then return false end
+			local clone = source:Clone()
+			local handle = clone:FindFirstChild("Handle")
+			if not handle or not handle:IsA("BasePart") then
+				pcall(function() clone:Destroy() end)
+				return false
+			end
+			clone.Name = "VD_FakeLimitedHorn"
+			handle.CanCollide = false
+			handle.CanTouch = false
+			handle.CanQuery = false
+			handle.Massless = true
+			local accAtt
+			for _, o in ipairs(handle:GetChildren()) do
+				if o:IsA("Attachment") then accAtt = o; break end
+			end
+			local targetAtt
+			if accAtt then
+				for _, o in ipairs(character:GetDescendants()) do
+					if o:IsA("Attachment") and o.Name == accAtt.Name then targetAtt = o; break end
+				end
+			end
+			clone.Parent = character
+			local head = character:FindFirstChild("Head")
+			if targetAtt and accAtt and targetAtt.Parent:IsA("BasePart") then
+				handle.CFrame = targetAtt.WorldCFrame * accAtt.CFrame:Inverse()
+			elseif head then
+				handle.CFrame = head.CFrame * CFrame.new(0, 0.65, 0)
+			else
+				pcall(function() clone:Destroy() end)
+				return false
+			end
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = "VD_FakeLimitedHornWeld"
+			weld.Part0 = handle
+			weld.Part1 = (targetAtt and targetAtt.Parent:IsA("BasePart")) and targetAtt.Parent or head
+			weld.Parent = handle
+			attached[#attached + 1] = clone
+			return true
+		end
+
+		if data.AssetId then
+			local ok, loaded = pcall(function() return game:GetObjects("rbxassetid://" .. tostring(data.AssetId)) end)
+			if ok and type(loaded) == "table" then
+				for _, root in ipairs(loaded) do
+					local list = {}
+					if root:IsA("Accessory") then
+						list[1] = root
+					else
+						for _, o in ipairs(root:GetDescendants()) do
+							if o:IsA("Accessory") then list[#list + 1] = o end
+						end
+					end
+					for _, acc in ipairs(list) do attach(acc) end
+					pcall(function() root:Destroy() end)
+				end
+			end
+		end
+
+		if #attached == 0 and data.MeshId and data.TextureId then
+			local head = character:FindFirstChild("Head")
+			if head then
+				local acc = Instance.new("Accessory")
+				acc.Name = "VD_FakeLimitedHorn"
+				local handle = Instance.new("Part")
+				handle.Name = "Handle"
+				handle.Size = Vector3.new(1, 1, 1)
+				handle.Transparency = 1
+				handle.CanCollide = false
+				handle.CanTouch = false
+				handle.CanQuery = false
+				handle.Massless = true
+				handle.CastShadow = false
+				handle.Parent = acc
+				local mesh = Instance.new("SpecialMesh")
+				mesh.MeshType = Enum.MeshType.FileMesh
+				mesh.MeshId = "rbxassetid://" .. data.MeshId
+				mesh.TextureId = "rbxassetid://" .. data.TextureId
+				mesh.Parent = handle
+				acc.Parent = character
+				handle.CFrame = head.CFrame * CFrame.new(0, 0.65, 0)
+				local weld = Instance.new("WeldConstraint")
+				weld.Name = "VD_FakeLimitedHornWeld"
+				weld.Part0 = handle
+				weld.Part1 = head
+				weld.Parent = handle
+				attached[#attached + 1] = acc
+			end
+		end
+
+		if #attached == 0 then return false end
+		hornObjs[name] = attached
+		return true
+	end
+
+	local function setHorn(name, on)
+		if on then
+			for other, enabled in pairs(hornOn) do
+				if enabled and other ~= name then
+					hornOn[other] = false
+					clearHorn(other)
+				end
+			end
+			if isKillerNow() then
+				hornOn[name] = false
+				say("Not available as Killer")
+				return
+			end
+			hornOn[name] = applyHorn(name)
+			say(hornOn[name] and "Horn applied" or "Horn failed")
+		else
+			hornOn[name] = false
+			clearHorn(name)
+		end
+	end
+
+	local function descApply(id, humanoid, override)
+		local desc = override
+		if not desc then
+			local ok, d = pcall(function() return Players:GetHumanoidDescriptionFromUserId(id) end)
+			if not ok or not d then return false end
+			desc = d
+		end
 		local applied = pcall(function() humanoid:ApplyDescriptionReset(desc) end)
 		if not applied then applied = pcall(function() humanoid:ApplyDescription(desc) end) end
 		if not applied then return false end
@@ -6104,9 +6403,23 @@ do
 			say("No character")
 			return
 		end
+		if isKillerNow() then
+			say("Not available as Killer")
+			return
+		end
+		if not origDesc then
+			local okO, d = pcall(function() return humanoid:GetAppliedDescription() end)
+			if okO and d then origDesc = d end
+		end
 		lastId = id
-		local done = descApply(id, humanoid)
-		if not done then done = legacyApply(id, character, humanoid) end
+		local done
+		if id == LP.UserId and origDesc then
+			done = descApply(id, humanoid, origDesc)
+		else
+			done = descApply(id, humanoid)
+			if not done then done = legacyApply(id, character, humanoid) end
+		end
+		if done then markOurs() end
 		if korless.on then
 			task.wait(0.1)
 			applyKorlessOnce()
@@ -6219,26 +6532,34 @@ do
 		end)
 	end)
 
-	local _, resetBtn = addOption(card, "Reset to Own Avatar", "rotate-ccw", true)
-	resetBtn.MouseButton1Click:Connect(function()
-		if busy then return end
-		busy = true
-		task.spawn(function()
-			say("Loading")
-			applyAvatar(LP.UserId)
-			busy = false
-		end)
-	end)
-
 	addCheckbox(card, "Korless Morph", "skull",
 		function() return korless.on end,
 		function(v) setKorless(v) end)
 
+	for _, hornName in ipairs(HORN_ORDER) do
+		addCheckbox(card, hornName, "crown",
+			function() return hornOn[hornName] == true end,
+			function(v) setHorn(hornName, v) end)
+	end
+
+	task.spawn(function()
+		while not unloaded do
+			task.wait(0.5)
+			if isKillerNow() and (next(ours) ~= nil or next(hornObjs) ~= nil) then
+				pcall(stripForKiller)
+			end
+		end
+	end)
+
 	LP.CharacterAdded:Connect(function()
-		task.wait(1.5)
+		task.wait(2.5)
 		if unloaded then return end
+		if isKillerNow() then return end
 		if AV.Enabled and lastId then applyAvatar(lastId) end
 		if korless.on then applyKorlessOnce() end
+		for name, enabled in pairs(hornOn) do
+			if enabled then applyHorn(name) end
+		end
 	end)
 end
 
@@ -6282,111 +6603,49 @@ do
 	opt("Low: Hide Sky", "cloud",      "LowGFX_Sky")
 	opt("Remove Trees",  "tree-pine",  "RemoveTree")
 	opt("Remove Grass",  "sprout",     "RemoveGrass")
-	local _, inspectBtn = addOption(card, "Inspect Aimed Object", "crosshair", true)
-	inspectBtn.MouseButton1Click:Connect(function()
-		local cam = workspace.CurrentCamera
-		if not cam then return end
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.FilterDescendantsInstances = { LP.Character }
-		local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * 1000, params)
-		local inst = res and res.Instance
-		if not inst then
-			card.sub.Text = "Nothing at screen center"
-			return
-		end
-		local chain, cur = {}, inst
-		for _ = 1, 6 do
-			if not cur or cur == workspace then break end
-			table.insert(chain, cur.Name .. " (" .. cur.ClassName .. ")")
-			cur = cur.Parent
-		end
-		local info = string.format("%s | Material=%s | Size=%.1f,%.1f,%.1f | Collide=%s | %s",
-			inst.Name, tostring(inst.Material), inst.Size.X, inst.Size.Y, inst.Size.Z,
-			tostring(inst.CanCollide), table.concat(chain, " < "))
-		if setclipboard then pcall(setclipboard, info) end
-		warn("[" .. HUB_NAME .. "] " .. info)
-		card.sub.Text = inst.Name
-	end)
 end
 
-State.HighCamera = { Enabled = false, Distance = 25, FOV = 120, Height = 0, CharScale = 5, UseScale = true }
+State.HighCamera = { Enabled = false, Distance = 25, FOV = 120, Height = 10 }
 State.HighCamObj = (function()
 	local H = State.HighCamera
 	local obj = {}
-	local conn, charConn
+	local active = false
 	local def = { fov = 70, minZ = 0.5, maxZ = 128 }
+	local BIND = "VDHighCamera"
 
-	local function humanoid()
-		local c = LP.Character
-		return c and c:FindFirstChildOfClass("Humanoid")
+	local function apply()
+		if unloaded then return end
+		local c = workspace.CurrentCamera
+		if not c then return end
+		c.FieldOfView = H.FOV
+		local d = H.Distance
+		LP.CameraMaxZoomDistance = d + 0.5
+		LP.CameraMinZoomDistance = math.max(0.1, d - 0.5)
+		c.CFrame = c.CFrame + Vector3.new(0, H.Height, 0)
 	end
 
-	function obj:ApplyScale(useScale)
-		local hum = humanoid()
-		if not hum then return end
-		local want = useScale
-		if want == nil then want = H.UseScale end
-		local sc = want and math.clamp((tonumber(H.CharScale) or 5) / 100, 0.01, 1) or 1
-		pcall(function()
-			hum.BodyHeightScale = sc
-			hum.BodyWidthScale = sc
-			hum.BodyDepthScale = sc
-			hum.HeadScale = sc
-		end)
-	end
-
-	local function resetScale()
-		local hum = humanoid()
-		if not hum then return end
-		pcall(function()
-			hum.BodyHeightScale = 1
-			hum.BodyWidthScale = 1
-			hum.BodyDepthScale = 1
-			hum.HeadScale = 1
-		end)
-	end
-
-	local function stop()
-		if conn then conn:Disconnect(); conn = nil end
-		if charConn then charConn:Disconnect(); charConn = nil end
-	end
-
-	function obj:SetEnabled(on)
-		H.Enabled = on == true
-		stop()
-		if H.Enabled then
-			local cam = workspace.CurrentCamera
-			if cam then def.fov = cam.FieldOfView end
+	function obj:Refresh()
+		local want = H.Enabled and State.CameraSettings.Enabled == true and not unloaded
+		if want == active then return end
+		active = want
+		if want then
+			local c = workspace.CurrentCamera
+			if c then def.fov = c.FieldOfView end
 			def.minZ = LP.CameraMinZoomDistance
 			def.maxZ = LP.CameraMaxZoomDistance
-			obj:ApplyScale()
-			conn = RunService.RenderStepped:Connect(function()
-				if unloaded or not H.Enabled then return end
-				local c = workspace.CurrentCamera
-				if not c then return end
-				c.FieldOfView = H.FOV
-				local d = H.Distance
-				LP.CameraMaxZoomDistance = d + 0.5
-				LP.CameraMinZoomDistance = math.max(0.1, d - 0.5)
-				local hum = humanoid()
-				if hum and hum.CameraOffset.Y ~= H.Height then
-					hum.CameraOffset = Vector3.new(0, H.Height, 0)
-				end
-			end)
-			charConn = LP.CharacterAdded:Connect(function()
-				task.wait(0.35)
-				if H.Enabled and not unloaded then obj:ApplyScale() end
-			end)
+			RunService:BindToRenderStep(BIND, Enum.RenderPriority.Camera.Value + 1, apply)
 		else
-			resetScale()
-			local hum = humanoid()
-			if hum then pcall(function() hum.CameraOffset = Vector3.new(0, 0, 0) end) end
+			pcall(function() RunService:UnbindFromRenderStep(BIND) end)
 			local c = workspace.CurrentCamera
 			if c then c.FieldOfView = def.fov end
 			LP.CameraMaxZoomDistance = def.maxZ
 			LP.CameraMinZoomDistance = def.minZ
 		end
+	end
+
+	function obj:SetEnabled(on)
+		H.Enabled = on == true
+		obj:Refresh()
 	end
 
 	return obj
@@ -6432,21 +6691,9 @@ do
 	addSlider(card, "High Camera FOV", "scan", 50, 120,
 		function() return math.clamp(math.floor(tonumber(hs.FOV) or 120), 50, 120) end,
 		function(v) hs.FOV = v end)
-	addSlider(card, "High Camera Height", "arrow-up", -5, 10,
-		function() return math.clamp(math.floor(tonumber(hs.Height) or 0), -5, 10) end,
+	addSlider(card, "High Camera Height", "arrow-up", -10, 40,
+		function() return math.clamp(math.floor(tonumber(hs.Height) or 10), -10, 40) end,
 		function(v) hs.Height = v end)
-	addCheckbox(card, "Use Character Scale", "user",
-		function() return hs.UseScale end,
-		function(v)
-			hs.UseScale = v
-			if hs.Enabled then hc:ApplyScale(v) end
-		end)
-	addSlider(card, "Character Scale %", "gauge", 1, 100,
-		function() return math.clamp(math.floor(tonumber(hs.CharScale) or 5), 1, 100) end,
-		function(v)
-			hs.CharScale = v
-			if hs.Enabled then hc:ApplyScale(hs.UseScale) end
-		end)
 end
 
 local Notch = new("TextButton", {
@@ -6581,6 +6828,7 @@ local function unload()
 	pcall(function() State.PerfObj:Stop() end)
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
+	pcall(function() State.SilentObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
 	pcall(function()
