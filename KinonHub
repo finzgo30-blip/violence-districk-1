@@ -1108,11 +1108,14 @@ State.SpearObj = (function()
 		local sliderSpeed = math.clamp(tonumber(V.SpearSpeed) or 180, 60, 180)
 		local farSpeed = math.min(isAuraMode(LP.Character) and 170 or 150, sliderSpeed)
 		local maxSpeed = sliderSpeed + (farSpeed - sliderSpeed) * far
-		local leadMul = 0.85 + (1.5 - 0.85) * far
+		-- Close-range spear prediction: use nearly full target velocity,
+		-- then cap the look-ahead time so the aim point does not run too far ahead.
+		local leadMul = 0.98 + 0.05 * far
 		local speed = math.clamp((chargeTime or BAL.FullChargeTime) * maxSpeed, 1, maxSpeed)
 		local gravity = getGravity()
 		local gMag = math.abs(gravity.Y)
-		local halfPing = getPingHalf() + 0.03 + 0.13 * far
+		local halfPing = math.clamp(getPingHalf() + 0.02 + 0.025 * far, 0.02, 0.095)
+		local maxLeadTime = dist <= 45 and 0.18 or 0.34
 
 		local aimTarget = hrp.Position + Vector3.new(0, 0.2, 0)
 		if dist > 100 then
@@ -1121,8 +1124,9 @@ State.SpearObj = (function()
 				aimTarget = head.Position
 			end
 		end
-		local nearMul = 0.2 + 0.8 * math.clamp((dist - 8) / 37, 0, 1)
-		local vel = clampVelY(estimateVelocity(targetChar, hrp)) * leadMul * nearMul
+		-- Do not fade prediction just because the target is close.
+		-- The lead-time cap above controls how far ahead the spear is aimed.
+		local vel = clampVelY(estimateVelocity(targetChar, hrp)) * leadMul
 		if V.Predict == false then vel = Vector3.zero end
 
 		local function solveTime(spd)
@@ -1130,7 +1134,8 @@ State.SpearObj = (function()
 			local tt = math.max(0.04, delta0.Magnitude / spd)
 			local ok = true
 			for _ = 1, 8 do
-				local leadPos = aimTarget + vel * (tt + halfPing)
+				local leadTime = math.clamp(tt + halfPing, 0.025, maxLeadTime)
+				local leadPos = aimTarget + vel * leadTime
 				local d = leadPos - origin
 				local dxz = Vector3.new(d.X, 0, d.Z).Magnitude
 				local dy = d.Y
@@ -1163,7 +1168,7 @@ State.SpearObj = (function()
 			end
 		end
 
-		local finalLead = aimTarget + vel * (t + halfPing)
+		local finalLead = aimTarget + vel * math.clamp(t + halfPing, 0.025, maxLeadTime)
 		local delta = finalLead - origin
 
 		if not reachable and gMag > 0.001 then
@@ -1943,6 +1948,36 @@ State.SilentObj = (function()
 	end
 
 	local circleGui, circleFrame, laserPart
+	local activeTool, toolConns = nil, {}
+	local isFiring, releaseUntil = false, 0
+
+	local function clearToolConnections()
+		for _, c in ipairs(toolConns) do pcall(function() c:Disconnect() end) end
+		table.clear(toolConns)
+		activeTool = nil
+		isFiring, releaseUntil = false, 0
+	end
+
+	local function bindActiveTool(ch)
+		local tool = ch and ch:FindFirstChild("Twist of Fate")
+		if tool == activeTool then return end
+		clearToolConnections()
+		if not (tool and tool:IsA("Tool")) then return end
+		activeTool = tool
+		toolConns[#toolConns + 1] = tool.Activated:Connect(function()
+			isFiring = true
+			releaseUntil = 0
+		end)
+		toolConns[#toolConns + 1] = tool.Deactivated:Connect(function()
+			isFiring = false
+			-- Keep the beam visible for a brief release frame, then hide it.
+			releaseUntil = tick() + 0.12
+		end)
+		toolConns[#toolConns + 1] = tool.Unequipped:Connect(function()
+			isFiring = false
+			releaseUntil = 0
+		end)
+	end
 
 	local function ensureCircle()
 		if circleGui and circleGui.Parent then return true end
@@ -1965,7 +2000,7 @@ State.SilentObj = (function()
 		corner.CornerRadius = UDim.new(1, 0)
 		corner.Parent = f
 		local stroke = Instance.new("UIStroke")
-		stroke.Color = Color3.fromRGB(255, 60, 60)
+		stroke.Color = Color3.fromRGB(255, 255, 255)
 		stroke.Thickness = 1.5
 		stroke.Transparency = 0.2
 		stroke.Parent = f
@@ -1992,7 +2027,7 @@ State.SilentObj = (function()
 			p.Name = "KINON_TOFSilentLaser"
 			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
 			p.Material = Enum.Material.Neon
-			p.Color = Color3.fromRGB(255, 60, 60)
+			p.Color = Color3.fromRGB(255, 0, 0)
 			p.Transparency = 1
 			p.Parent = workspace
 			laserPart = p
@@ -2017,7 +2052,9 @@ State.SilentObj = (function()
 
 		if not active or not T.ShowLaser then return hideLaser() end
 		local ch = LP.Character
-		if not (ch and ch:FindFirstChild("Twist of Fate")) then return hideLaser() end
+		bindActiveTool(ch)
+		if not (activeTool and activeTool.Parent == ch) then return hideLaser() end
+		if not isFiring and tick() > releaseUntil then return hideLaser() end
 		local kc = killerChar()
 		local part = kc and targetPart(kc)
 		local from = muzzle(ch)
@@ -2062,6 +2099,7 @@ State.SilentObj = (function()
 
 	function obj:Destroy()
 		T.Enabled = false
+		clearToolConnections()
 		restore()
 		if circleGui then pcall(function() circleGui:Destroy() end) end
 		if laserPart then pcall(function() laserPart:Destroy() end) end
@@ -4906,7 +4944,7 @@ corner(dot, 5)
 
 new("TextLabel", {
 	Position = UDim2.new(0, 38, 0, 7),
-	Size = UDim2.new(1, -120, 0, 18),
+	Size = UDim2.new(1, -190, 0, 18),
 	BackgroundTransparency = 1,
 	Text = HUB_NAME,
 	TextColor3 = C.Text,
@@ -4916,7 +4954,7 @@ new("TextLabel", {
 }, Header)
 new("TextLabel", {
 	Position = UDim2.new(0, 38, 0, 25),
-	Size = UDim2.new(1, -120, 0, 12),
+	Size = UDim2.new(1, -190, 0, 12),
 	BackgroundTransparency = 1,
 	Text = "Beta  \226\128\162  tap a card to open its options",
 	TextColor3 = C.Sub,
@@ -4924,6 +4962,112 @@ new("TextLabel", {
 	TextSize = 10,
 	TextXAlignment = Enum.TextXAlignment.Left,
 }, Header)
+
+
+-- Floating FPS/Ping pills on the gameplay HUD (near the Roblox top bar).
+-- They are positioned independently from the hub window.
+local perfBox = new("Frame", {
+	Name = "PerformanceStatsHUD",
+	AnchorPoint = Vector2.new(0, 0),
+	Position = UDim2.new(0.5, 174, 0, 18),
+	Size = UDim2.fromOffset(124, 25),
+	BackgroundTransparency = 1,
+	ZIndex = 50,
+}, Gui)
+
+local perfLayout = new("UIListLayout", {
+	FillDirection = Enum.FillDirection.Horizontal,
+	HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	VerticalAlignment = Enum.VerticalAlignment.Center,
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	Padding = UDim.new(0, 5),
+}, perfBox)
+
+local function makePerfPill(name, initialText, order, width)
+	local pill = new("Frame", {
+		Name = name .. "Pill",
+		Size = UDim2.fromOffset(width, 23),
+		BackgroundColor3 = Color3.fromRGB(24, 27, 31),
+		BackgroundTransparency = 0.08,
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+		ZIndex = 50,
+	}, perfBox)
+	corner(pill, 12)
+	local stroke = new("UIStroke", {
+		Color = Color3.fromRGB(80, 85, 92),
+		Transparency = 0.35,
+		Thickness = 1,
+	}, pill)
+	local dot = new("Frame", {
+		Name = "StatusDot",
+		Position = UDim2.new(0, 7, 0.5, -3),
+		Size = UDim2.fromOffset(6, 6),
+		BackgroundColor3 = Color3.fromRGB(65, 220, 105),
+		BorderSizePixel = 0,
+		ZIndex = 52,
+	}, pill)
+	corner(dot, 5)
+	local label = new("TextLabel", {
+		Name = "Value",
+		Position = UDim2.new(0, 17, 0, 0),
+		Size = UDim2.new(1, -20, 1, 0),
+		BackgroundTransparency = 1,
+		Text = initialText,
+		TextColor3 = Color3.fromRGB(245, 247, 250),
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 52,
+	}, pill)
+	return label, dot, pill, stroke
+end
+
+local fpsLabel, fpsDot, fpsPill = makePerfPill("FPS", "FPS --", 1, 54)
+local pingLabel, pingDot, pingPill = makePerfPill("PING", "-- ms", 2, 60)
+
+local GOOD = Color3.fromRGB(55, 210, 115)
+local WARN = Color3.fromRGB(245, 190, 55)
+local BAD = Color3.fromRGB(240, 75, 75)
+
+local function setPillStatus(label, dot, pill, color, value)
+	label.Text = value
+	dot.BackgroundColor3 = color
+	pill.BackgroundColor3 = Color3.fromRGB(
+		math.floor(24 + color.R * 34),
+		math.floor(27 + color.G * 34),
+		math.floor(31 + color.B * 34)
+	)
+end
+
+local smoothedFPS = 60
+local pingMs = 0
+local pingClock = 0
+local uiClock = 0
+track(RunService.RenderStepped:Connect(function(dt)
+	if unloaded or not Gui.Parent then return end
+	if dt > 0 then
+		local instantFPS = 1 / dt
+		smoothedFPS = smoothedFPS * 0.82 + instantFPS * 0.18
+	end
+	uiClock += dt
+	pingClock += dt
+	if pingClock >= 1 then
+		pingClock = 0
+		local ok, value = pcall(function() return LP:GetNetworkPing() end)
+		if ok and type(value) == "number" then
+			pingMs = math.max(0, math.floor(value * 1000 + 0.5))
+		end
+	end
+	if uiClock >= 0.25 then
+		uiClock = 0
+		local fps = math.floor(smoothedFPS + 0.5)
+		local fpsColor = fps >= 50 and GOOD or (fps >= 30 and WARN or BAD)
+		local pingColor = pingMs < 100 and GOOD or (pingMs < 180 and WARN or BAD)
+		setPillStatus(fpsLabel, fpsDot, fpsPill, fpsColor, "FPS " .. tostring(fps))
+		setPillStatus(pingLabel, pingDot, pingPill, pingColor, tostring(pingMs) .. " ms")
+	end
+end))
 
 local headerBtns = new("Frame", {
 	AnchorPoint = Vector2.new(1, 0.5),
@@ -5956,42 +6100,77 @@ do
 	end
 end
 
-State.Moonwalk = { Enabled = false, BackSpeed = 12, SwingArea = 9, SwingSpeed = 14 }
+State.Moonwalk = { Enabled = false, SwingSpeed = 30, SwingAngle = 35, BackSpeed = 13, LimitSpeed = true }
 
 do
 	local s = State.Moonwalk
-	local conn
-	local direction, lastSwitch = 1, 0
+	local STEP = "KinonMoonwalk"
+	local bound = false
+	local saved, heading = nil, nil
 	local card
 
-	local function stop()
-		if conn then
-			conn:Disconnect()
-			conn = nil
+	local function restore()
+		local d = saved
+		saved = nil
+		if d and d.hum and d.hum.Parent then
+			pcall(function()
+				d.hum.AutoRotate = d.auto
+				if d.limited then d.hum.WalkSpeed = d.speed end
+			end)
 		end
+	end
+
+	local function step()
+		if unloaded or not s.Enabled then return end
+		local char = LP.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local cam = workspace.CurrentCamera
+		if not hrp or not hum or not cam or hum.Health <= 0 or hum.Sit
+			or char:GetAttribute("Downed") == true or char:GetAttribute("IsDown") == true
+			or char:GetAttribute("Knocked") == true then
+			restore()
+			return
+		end
+		if not saved or saved.hum ~= hum then
+			restore()
+			saved = { hum = hum, auto = hum.AutoRotate, speed = hum.WalkSpeed, limited = false }
+		end
+
+		local look = cam.CFrame.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		if flat.Magnitude > 0.1 then heading = flat.Unit end
+		if not heading then return end
+
+		hum.AutoRotate = false
+		if s.LimitSpeed then
+			local ws = math.clamp(tonumber(s.BackSpeed) or 13, 4, 40)
+			if hum.WalkSpeed ~= ws then hum.WalkSpeed = ws end
+			saved.limited = true
+		elseif saved.limited then
+			hum.WalkSpeed = saved.speed
+			saved.limited = false
+		end
+
+		local angle = math.sin(tick() * (tonumber(s.SwingSpeed) or 30)) * (tonumber(s.SwingAngle) or 35)
+		local pos = hrp.Position
+		hrp.CFrame = CFrame.lookAt(pos, pos + heading) * CFrame.Angles(0, math.rad(angle), 0)
+		hum:Move(Vector3.new(0, 0, 1), true)
+	end
+
+	local function stop()
+		if bound then
+			bound = false
+			pcall(function() RunService:UnbindFromRenderStep(STEP) end)
+		end
+		restore()
 	end
 
 	local function start()
 		stop()
-		direction, lastSwitch = 1, 0
-		conn = RunService.RenderStepped:Connect(function()
-			if unloaded or not s.Enabled then return end
-			local char = LP.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if not hrp or not hum or hum.Health <= 0 then return end
-
-			local now = tick()
-			local interval = 1 / math.max(tonumber(s.SwingSpeed) or 14, 1)
-			if now - lastSwitch >= interval then
-				direction = -direction
-				lastSwitch = now
-			end
-
-			local back = hrp.CFrame.LookVector * -((tonumber(s.BackSpeed) or 12) / 10)
-			local side = hrp.CFrame.RightVector * (direction * ((tonumber(s.SwingArea) or 9) / 10))
-			hum:Move(back + side, false)
-		end)
+		heading = nil
+		bound = true
+		RunService:BindToRenderStep(STEP, Enum.RenderPriority.Camera.Value + 1, step)
 	end
 
 	local function toggleMoonwalk()
@@ -6190,18 +6369,21 @@ do
 
 	card = addCard(14, "footprints", "Moonwalk", "", "Moonwalk")
 	local function sync()
-		card.sub.Text = string.format("Swing %d \226\128\162 Area %.1f", s.SwingSpeed, s.SwingArea / 10)
+		card.sub.Text = string.format("Swing %d \226\128\162 Angle %d", s.SwingSpeed, s.SwingAngle)
 	end
 	sync()
 
-	addSlider(card, "Swing Speed", "gauge", 2, 50,
-		function() return math.clamp(math.floor(tonumber(s.SwingSpeed) or 14), 2, 50) end,
+	addSlider(card, "Swing Speed", "gauge", 2, 60,
+		function() return math.clamp(math.floor(tonumber(s.SwingSpeed) or 30), 2, 60) end,
 		function(v) s.SwingSpeed = v; sync() end)
-	addSlider(card, "Swing Area (x0.1)", "move-horizontal", 1, 30,
-		function() return math.clamp(math.floor(tonumber(s.SwingArea) or 9), 1, 30) end,
-		function(v) s.SwingArea = v; sync() end)
-	addSlider(card, "Back Speed (x0.1)", "arrow-down", 1, 30,
-		function() return math.clamp(math.floor(tonumber(s.BackSpeed) or 12), 1, 30) end,
+	addSlider(card, "Swing Angle", "move-horizontal", 0, 90,
+		function() return math.clamp(math.floor(tonumber(s.SwingAngle) or 35), 0, 90) end,
+		function(v) s.SwingAngle = v; sync() end)
+	addCheckbox(card, "Limit Back Speed", "gauge",
+		function() return s.LimitSpeed == true end,
+		function(v) s.LimitSpeed = v end)
+	addSlider(card, "Back Speed", "arrow-down", 4, 40,
+		function() return math.clamp(math.floor(tonumber(s.BackSpeed) or 13), 4, 40) end,
 		function(v) s.BackSpeed = v end)
 	addCheckbox(card, "Button Moonwalk", "mouse-pointer-click",
 		function()
@@ -6216,6 +6398,7 @@ end
 
 State.StunObj = (function()
 	local STUN_ATTRS = { "IsStunned", "isStunned", "Stunned", "stunned", "IsStun", "Stun" }
+	local DEFAULT_STUN = 2
 	local cache = {}
 	local acc = 0
 	local obj = {}
@@ -6233,6 +6416,13 @@ State.StunObj = (function()
 		return sv ~= nil and sv.Value > 0
 	end
 
+	local function stunLeft(char)
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local sv = hum and hum:FindFirstChild("StunValue")
+		if sv and sv:IsA("NumberValue") and sv.Value > 0 and sv.Value < 60 then return sv.Value end
+		return nil
+	end
+
 	local function isKillerPlayer(p)
 		local team = p.Team and string.lower(p.Team.Name) or ""
 		return string.find(team, "killer", 1, true) ~= nil
@@ -6243,6 +6433,7 @@ State.StunObj = (function()
 		if not e then return end
 		cache[char] = nil
 		pcall(function() e.pulse:Cancel() end)
+		pcall(function() if e.tween then e.tween:Cancel() end end)
 		if animate and e.gui.Parent then
 			TweenService:Create(e.scale, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Scale = 0 }):Play()
 			task.delay(0.25, function() pcall(function() e.gui:Destroy() end) end)
@@ -6257,7 +6448,7 @@ State.StunObj = (function()
 
 		local gui = new("BillboardGui", {
 			Name = "KINON_StunIndicator",
-			Size = UDim2.fromOffset(132, 34),
+			Size = UDim2.fromOffset(132, 42),
 			StudsOffset = Vector3.new(0, 3, 0),
 			AlwaysOnTop = true,
 			LightInfluence = 0,
@@ -6268,7 +6459,7 @@ State.StunObj = (function()
 		local main = new("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(132, 34),
+			Size = UDim2.fromOffset(132, 42),
 			BackgroundColor3 = C.Card,
 			BackgroundTransparency = 0.05,
 			BorderSizePixel = 0,
@@ -6278,7 +6469,7 @@ State.StunObj = (function()
 		local stroke = new("UIStroke", { Color = C.Accent, Thickness = 1.2, Transparency = 0.5 }, main)
 
 		local holder = new("Frame", {
-			Position = UDim2.new(0, 6, 0.5, -12),
+			Position = UDim2.new(0, 6, 0, 5),
 			Size = UDim2.fromOffset(24, 24),
 			BackgroundColor3 = C.Surface,
 			BorderSizePixel = 0,
@@ -6288,7 +6479,7 @@ State.StunObj = (function()
 
 		new("TextLabel", {
 			Position = UDim2.new(0, 38, 0, 4),
-			Size = UDim2.new(1, -46, 0, 14),
+			Size = UDim2.new(1, -86, 0, 14),
 			BackgroundTransparency = 1,
 			Text = "STUNNED",
 			TextColor3 = C.Text,
@@ -6308,13 +6499,47 @@ State.StunObj = (function()
 			TextTruncate = Enum.TextTruncate.AtEnd,
 		}, main)
 
+		local timeLabel = new("TextLabel", {
+			Position = UDim2.new(1, -52, 0, 4),
+			Size = UDim2.fromOffset(44, 14),
+			BackgroundTransparency = 1,
+			Text = "",
+			TextColor3 = C.Text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+		}, main)
+
+		local barTrack = new("Frame", {
+			Position = UDim2.new(0, 8, 1, -9),
+			Size = UDim2.new(1, -16, 0, 4),
+			BackgroundColor3 = C.Surface,
+			BorderSizePixel = 0,
+		}, main)
+		corner(barTrack, 2)
+		local fill = new("Frame", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = C.Accent,
+			BorderSizePixel = 0,
+		}, barTrack)
+		corner(fill, 2)
+
 		TweenService:Create(scale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 		local pulse = TweenService:Create(stroke,
 			TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
 			{ Transparency = 0.1 })
 		pulse:Play()
 
-		return { gui = gui, scale = scale, pulse = pulse }
+		return { gui = gui, scale = scale, pulse = pulse, fill = fill, timeLabel = timeLabel, total = 1, endAt = 0, tween = nil }
+	end
+
+	local function startTimer(e, left)
+		e.total = math.max(left, 0.05)
+		e.endAt = os.clock() + left
+		pcall(function() if e.tween then e.tween:Cancel() end end)
+		e.fill.Size = UDim2.fromScale(math.clamp(left / e.total, 0, 1), 1)
+		e.tween = TweenService:Create(e.fill, TweenInfo.new(left, Enum.EasingStyle.Linear), { Size = UDim2.fromScale(0, 1) })
+		e.tween:Play()
 	end
 
 	function obj.Clear(animate)
@@ -6338,20 +6563,24 @@ State.StunObj = (function()
 			return
 		end
 
-		local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-		local range = math.clamp(tonumber(S.StunRange) or 500, 50, 2000)
 		local seen = {}
-		if myRoot then
-			for _, p in ipairs(Players:GetPlayers()) do
-				local char = p.Character
-				if p ~= LP and char and isKillerPlayer(p) then
-					local hrp = char:FindFirstChild("HumanoidRootPart")
-					if hrp and (hrp.Position - myRoot.Position).Magnitude <= range then
-						local ok, stunned = pcall(isStunned, char)
-						if ok and stunned then
-							seen[char] = true
-							if not cache[char] then cache[char] = build(char, p) end
-						end
+		for _, p in ipairs(Players:GetPlayers()) do
+			local char = p.Character
+			if p ~= LP and char and isKillerPlayer(p) then
+				local ok, stunned = pcall(isStunned, char)
+				if ok and stunned then
+					seen[char] = true
+					local e = cache[char]
+					local left = stunLeft(char)
+					if not e then
+						e = build(char, p)
+						cache[char] = e
+						if e then startTimer(e, left or DEFAULT_STUN) end
+					elseif left and math.abs((e.endAt - os.clock()) - left) > 0.6 then
+						startTimer(e, left)
+					end
+					if e then
+						e.timeLabel.Text = string.format("%.1fs", math.max(0, e.endAt - os.clock()))
 					end
 				end
 			end
@@ -6389,9 +6618,6 @@ do
 	addCheckbox(card, "Stun Indicator", "zap",
 		function() return s.StunInd == true end,
 		function(v) s.StunInd = v end)
-	addSlider(card, "Stun Detect Range", "ruler", 50, 2000,
-		function() return math.clamp(math.floor(tonumber(s.StunRange) or 500), 50, 2000) end,
-		function(v) s.StunRange = v end)
 end
 
 do
@@ -7051,6 +7277,12 @@ end
 do
 	local s = State.TOFSilent
 	local card = addCard(11, "eye", "Silent Aim Twist of Fate", "", "TOFSilent")
+	addCheckbox(card, "Enable Visuals", "eye",
+		function() return s.Enabled end,
+		function(v)
+			s.Enabled = v
+			if State.SilentObj then State.SilentObj:Refresh() end
+		end)
 	addCheckbox(card, "Predict", "move",
 		function() return s.Predict end,
 		function(v) s.Predict = v end)
