@@ -1634,6 +1634,7 @@ State.TOFSilent = {
 	Enabled = false,
 	FOV = 120,
 	Predict = false,
+	LeadScale = 100, -- kekuatan prediksi (%)
 	ShowCircle = true,
 	ShowLaser = true,
 }
@@ -1850,13 +1851,14 @@ State.SilentObj = (function()
 	end
 
 	local PROJ_SPEED = 800
-	local LEAD_MAX_TIME = 0.14
-	local LEAD_MAX_DIST = 4.5
-	local NEAR_START = 6
-	local NEAR_FULL = 20
-	local HISTORY_WINDOW = 0.15
+	local LEAD_MAX_TIME = 0.5   -- sebelumnya 0.14: terlalu kecil, tembakan ke killer yang jalan selalu kurang lead
+	local LEAD_MAX_DIST = 16    -- sebelumnya 4.5
+	local NEAR_START = 1        -- sebelumnya 6: lead baru penuh di 20 stud, jadi jarak dekat/menengah meleset
+	local NEAR_FULL = 5         -- sebelumnya 20
+	local INTERP_DELAY = 0.05   -- delay interpolasi posisi pemain lain di layar
+	local HISTORY_WINDOW = 0.12
 	local HISTORY_KEEP = 0.4
-	local VEL_CAP = 32
+	local VEL_CAP = 44
 	local Y_VEL_CLAMP = 14
 	local TELEPORT_STEP = 12
 	local history = setmetatable({}, { __mode = "k" })
@@ -1904,12 +1906,12 @@ State.SilentObj = (function()
 		return limitVel(part.AssemblyLinearVelocity or Vector3.zero)
 	end
 
-	local function halfPing()
+	-- GetNetworkPing = waktu satu arah. Posisi killer di layar sudah tertinggal 1 arah (server -> kita),
+	-- tembakan butuh 1 arah lagi (kita -> server): total 2x ping + interpolasi + waktu terbang peluru.
+	local function latencyLead()
 		local ok, ping = pcall(function() return LP:GetNetworkPing() end)
-		if ok and type(ping) == "number" and ping > 0 then
-			return math.clamp(ping * 0.5, 0, 0.25)
-		end
-		return 0.035
+		local oneWay = (ok and type(ping) == "number" and ping > 0) and math.clamp(ping, 0.01, 0.25) or 0.06
+		return oneWay * 2 + INTERP_DELAY
 	end
 
 	track(RunService.Heartbeat:Connect(function()
@@ -1925,9 +1927,10 @@ State.SilentObj = (function()
 		local vel = getVelocity(part)
 		if vel.Magnitude < 1 then return pos end
 		local dist = (pos - from).Magnitude
-		local leadTime = math.min(dist / PROJ_SPEED + halfPing(), LEAD_MAX_TIME)
+		local leadTime = math.min(dist / PROJ_SPEED + latencyLead(), LEAD_MAX_TIME)
 		local near = math.clamp((dist - NEAR_START) / (NEAR_FULL - NEAR_START), 0, 1)
-		local lead = vel * leadTime * near
+		local scale = math.clamp((tonumber(T.LeadScale) or 100) / 100, 0.3, 3)
+		local lead = vel * leadTime * near * scale
 		if lead.Magnitude > LEAD_MAX_DIST then lead = lead.Unit * LEAD_MAX_DIST end
 		return pos + lead
 	end
@@ -1957,6 +1960,7 @@ State.SilentObj = (function()
 	local circleGui, circleFrame, laserPart
 	local activeTool, toolConns = nil, {}
 	local isFiring, releaseUntil = false, 0
+	local lastAimDir, lastAimAt = nil, 0
 
 	local function clearToolConnections()
 		for _, c in ipairs(toolConns) do pcall(function() c:Disconnect() end) end
@@ -1979,6 +1983,60 @@ State.SilentObj = (function()
 		end
 	end))
 
+	-- Lintasan peluru Twist of Fate: red laser LURUS (bukan lengkung) dari moncong sampai kena objek / 500 stud.
+	local BULLET_LASER_MAX, BULLET_LASER_LIFETIME = 500, 0.6
+	local function fireTrail(ch)
+		if unloaded or not (T.Enabled and T.ShowLaser) or not ch then return end
+		local from = muzzle(ch)
+		if not from then return end
+		local dir
+		if lastAimDir and tick() - lastAimAt < 0.5 then
+			dir = lastAimDir
+		else
+			local good, d = pcall(compute, ch)
+			if good and d then dir = d end
+		end
+		if not dir then
+			local cam = workspace.CurrentCamera
+			dir = cam and cam.CFrame.LookVector
+		end
+		if typeof(dir) ~= "Vector3" or dir.Magnitude < 0.01 then return end
+		dir = dir.Unit
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.RespectCanCollide = true
+		params.FilterDescendantsInstances = { ch }
+		local hit = workspace:Raycast(from, dir * BULLET_LASER_MAX, params)
+		local endPos = hit and hit.Position or (from + dir * BULLET_LASER_MAX)
+		local len = (endPos - from).Magnitude
+		if len < 0.5 then return end
+
+		local cam = workspace.CurrentCamera
+		local camPos = cam and cam.CFrame.Position or from
+		local thick = math.clamp((from - camPos).Magnitude * 0.004, 0.1, 0.3)
+		local beam = Instance.new("Part")
+		beam.Name = "KINON_TOFBulletLaser"
+		beam.Anchored, beam.CanCollide, beam.CanQuery, beam.CanTouch, beam.CastShadow = true, false, false, false, false
+		beam.Material = Enum.Material.Neon
+		beam.Color = Color3.fromRGB(255, 30, 30)
+		beam.Transparency = 0.05
+		beam.Size = Vector3.new(thick, thick, len)
+		beam.CFrame = CFrame.lookAt(from + dir * (len / 2), endPos)
+		beam.Parent = workspace
+
+		task.spawn(function()
+			local start = os.clock()
+			while beam.Parent and not unloaded do
+				local alpha = (os.clock() - start) / BULLET_LASER_LIFETIME
+				if alpha >= 1 then break end
+				beam.Transparency = 0.05 + alpha * 0.95
+				RunService.Heartbeat:Wait()
+			end
+			pcall(function() beam:Destroy() end)
+		end)
+	end
+
 	local function bindActiveTool(ch)
 		local tool = ch and ch:FindFirstChild("Twist of Fate")
 		if tool == activeTool then return end
@@ -1997,6 +2055,8 @@ State.SilentObj = (function()
 			isFiring = false
 			-- Keep the beam visible for a brief release frame, then hide it.
 			releaseUntil = tick() + 0.12
+			local owner = tool.Parent
+			task.defer(fireTrail, owner)
 		end)
 		toolConns[#toolConns + 1] = tool.Unequipped:Connect(function()
 			isFiring = false
@@ -2091,7 +2151,7 @@ State.SilentObj = (function()
 		if not (part and from) then return hideLaser() end
 		local pos = aimPoint(part, from)
 		if not inFov(pos) then return hideLaser() end
-		updateLaser(from, pos)
+		hideLaser() -- garis bidik live diganti lintasan peluru (fireTrail)
 	end))
 
 	local function restore()
@@ -2113,8 +2173,13 @@ State.SilentObj = (function()
 				e.aimDirection = function(character, camCF)
 					if unloaded or not T.Enabled then return orig(character, camCF) end
 					local good, dir = pcall(compute, character)
-					if good and dir then return dir end
-					return orig(character, camCF)
+					if good and dir then
+						lastAimDir, lastAimAt = dir, tick()
+						return dir
+					end
+					local res = orig(character, camCF)
+					if typeof(res) == "Vector3" then lastAimDir, lastAimAt = res, tick() end
+					return res
 				end
 				effects, original = e, orig
 			end)
@@ -4074,47 +4139,34 @@ local ParryUIRefresh = function() end
 local ParryCirclePart, ParryCircleAdornment
 
 local function KINON_ShouldPassFaceCheck(killerRoot, playerRoot)
-	if Parry.AggressiveMode then
+	-- Aggressive Mode ON: Face Sensitivity TIDAK dipakai sama sekali.
+	-- Killer menghadap ke mana pun, begitu masuk radius langsung boleh parry.
+	if Parry.AggressiveMode == true then
 		return true
 	end
+
+	-- Aggressive Mode OFF: pakai Face Sensitivity (killer harus menghadap ke arah kita).
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local memo = Parry.FaceMemo
-	if not memo then
-		memo = setmetatable({}, { __mode = "k" })
-		Parry.FaceMemo = memo
-	end
-	local now = os.clock()
-	if memo[killerRoot] and now - memo[killerRoot] < 0.6 then
-		return true
-	end
 	local offset = playerRoot.Position - killerRoot.Position
-	local dist = offset.Magnitude
-	if dist <= 6 then
-		return true
+	if offset.Magnitude <= 0.5 then
+		return true -- posisi hampir tumpang tindih, arah tidak bisa dihitung
 	end
 	local dir = offset.Unit
 	local sensitivity = math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10
 	local maxAngle = 20 + sensitivity * 100
 	local cosLimit = math.cos(math.rad(maxAngle))
-	local passed = killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit
-	if not passed then
-		local model = killerRoot.Parent
-		local head = model and model:FindFirstChild("Head")
-		if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
-			passed = true
-		end
+
+	if killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit then
+		return true
 	end
-	if not passed then
-		local vel = killerRoot.AssemblyLinearVelocity
-		if vel and vel.Magnitude > 8 then
-			local velLimit = math.cos(math.rad(math.min(maxAngle + 20, 150)))
-			if vel.Unit:Dot(dir) >= velLimit then passed = true end
-		end
+	local model = killerRoot.Parent
+	local head = model and model:FindFirstChild("Head")
+	if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
+		return true
 	end
-	if passed then memo[killerRoot] = now end
-	return passed
+	return false
 end
 
 local function CreateCustomParryGUI()
@@ -4295,6 +4347,10 @@ end
 local CustomParryGui = CreateCustomParryGUI()
 if CustomParryGui then CustomParryGui.Enabled = false end
 Parry.ShouldPassFaceCheck = KINON_ShouldPassFaceCheck
+
+-- PreSimulation jalan lebih awal di tiap frame dibanding Heartbeat -> deteksi & kirim parry lebih cepat
+local KINON_FrameSignal = RunService.Heartbeat
+pcall(function() if RunService.PreSimulation then KINON_FrameSignal = RunService.PreSimulation end end)
 
 local KINON_ParryEngine = {
 	LastAttempt = 0,
@@ -4528,57 +4584,68 @@ task.spawn(function()
 	end
 end)
 
+local KINON_ActionButtonCache
+local function KINON_GetActionButton()
+	local cached = KINON_ActionButtonCache
+	if cached and cached.Parent then return cached end
+	local playerGui = LP:FindFirstChildOfClass("PlayerGui")
+	local survivorGui = playerGui and (playerGui:FindFirstChild("Survivor-mob") or playerGui:FindFirstChild("Survivor"))
+	local controls = survivorGui and survivorGui:FindFirstChild("Controls")
+	local button = controls and (controls:FindFirstChild("Gui-mob") or controls:FindFirstChild("action"))
+	KINON_ActionButtonCache = button
+	return button
+end
+
 local function KINON_TryFallbackParry()
 	local fired = false
+
+	-- Sinyal tombol parry: Down lalu Up dikirim LANGSUNG (tanpa task.defer), lookup tombol di-cache.
 	pcall(function()
-		local playerGui = LP:FindFirstChildOfClass("PlayerGui")
-		local survivorGui = playerGui and (playerGui:FindFirstChild("Survivor-mob") or playerGui:FindFirstChild("Survivor"))
-		local controls = survivorGui and survivorGui:FindFirstChild("Controls")
-		local actionButton = controls and (controls:FindFirstChild("Gui-mob") or controls:FindFirstChild("action"))
-		if actionButton then
-			if typeof(firesignal) == "function" then
-				pcall(function() firesignal(actionButton.MouseButton1Down) end)
-				task.defer(function() pcall(function() firesignal(actionButton.MouseButton1Up) end) end)
-				fired = true
+		local actionButton = KINON_GetActionButton()
+		if not actionButton then return end
+		if typeof(firesignal) == "function" then
+			local okDown = pcall(firesignal, actionButton.MouseButton1Down)
+			pcall(firesignal, actionButton.MouseButton1Up)
+			if okDown then fired = true end
+		end
+		if not fired and typeof(getconnections) == "function" then
+			local okDown, downLinks = pcall(getconnections, actionButton.MouseButton1Down)
+			if okDown and type(downLinks) == "table" then
+				for _, link in ipairs(downLinks) do pcall(function() link:Fire(); fired = true end) end
 			end
-			if typeof(getconnections) == "function" then
-				local okDown, downLinks = pcall(function() return getconnections(actionButton.MouseButton1Down) end)
-				if okDown and type(downLinks) == "table" then
-					for _, link in ipairs(downLinks) do pcall(function() link:Fire(); fired = true end) end
-				end
-				local okUp, upLinks = pcall(function() return getconnections(actionButton.MouseButton1Up) end)
-				if okUp and type(upLinks) == "table" then
-					task.defer(function()
-						for _, link in ipairs(upLinks) do pcall(function() link:Fire() end) end
-					end)
-				end
+			local okUp, upLinks = pcall(getconnections, actionButton.MouseButton1Up)
+			if okUp and type(upLinks) == "table" then
+				for _, link in ipairs(upLinks) do pcall(function() link:Fire() end) end
 			end
 		end
 	end)
 
 	local tool = KINON_GetParryTool()
-	if typeof(tool) == "Instance" and tool:IsA("Tool") then
+	if not fired and typeof(tool) == "Instance" and tool:IsA("Tool") then
 		pcall(function() tool:Activate(); fired = true end)
 	end
 
-	pcall(function()
-		local character = LP.Character
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
-			local toolObj = typeof(tool) == "Instance" and tool or nil
-			local animId = toolObj and toolObj:GetAttribute("useanim") or "109133187196613"
-			local numericId = tostring(animId):match("%d+")
-			if numericId and numericId ~= "" then
-				local animation = Instance.new("Animation")
-				animation.AnimationId = "rbxassetid://" .. numericId
-				local animTrack = animator:LoadAnimation(animation)
-				animTrack.Priority = Enum.AnimationPriority.Action
-				animTrack:Play()
-				fired = true
+	-- Animasi manual hanya sebagai cadangan terakhir (LoadAnimation lambat, jadi tidak dipakai kalau sinyal sudah terkirim).
+	if not fired then
+		pcall(function()
+			local character = LP.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
+				local toolObj = typeof(tool) == "Instance" and tool or nil
+				local animId = toolObj and toolObj:GetAttribute("useanim") or "109133187196613"
+				local numericId = tostring(animId):match("%d+")
+				if numericId and numericId ~= "" then
+					local animation = Instance.new("Animation")
+					animation.AnimationId = "rbxassetid://" .. numericId
+					local animTrack = animator:LoadAnimation(animation)
+					animTrack.Priority = Enum.AnimationPriority.Action
+					animTrack:Play()
+					fired = true
+				end
 			end
-		end
-	end)
+		end)
+	end
 	return fired
 end
 
@@ -4660,8 +4727,8 @@ end
 
 local function KINON_TryParry(reason, killerRoot)
 	if unloaded or not Parry.Enabled then return false end
-	-- tightened from 0.012 for faster back-to-back reactions
-	if tick() - KINON_ParryEngine.LastAttempt < 0.008 then return false end
+	-- gate dipangkas supaya sinyal parry langsung terkirim
+	if tick() - KINON_ParryEngine.LastAttempt < 0.002 then return false end
 	if not KINON_GetParryTool() then return false end
 	if KINON_IsBusyInteracting() then return false end
 
@@ -4687,8 +4754,8 @@ local function KINON_TryParry(reason, killerRoot)
 			return false
 		end
 	end
-	-- tightened from 0.10 so quick follow-up swings aren't missed
-	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.06 then return false end
+	-- jeda setelah parry sukses dipangkas (anti double-parry tetap ada)
+	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.03 then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
 	local restoreFacing = nil
@@ -4759,6 +4826,7 @@ local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, 
 		end)
 	end
 	if not inRange then return false end
+	if Parry.AggressiveMode == true then return true end -- tanpa face check
 	if not KINON_ShouldPassFaceCheck(killerRoot, playerRoot) then return false end
 	return true
 end
@@ -4823,7 +4891,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 				end
 				if hit and KINON_TryParry("Animation " .. animationId, killerRoot) then return end
 			end
-			RunService.Heartbeat:Wait()
+			KINON_FrameSignal:Wait()
 		until tick() - startTime >= windowT
 	end)
 end
@@ -6106,7 +6174,11 @@ do
 	ParryUIRefresh = card.refresh
 
 	local function sync()
-		card.sub.Text = string.format("Range %d \226\128\162 Face %d", s.Range, s.FaceSensitivity)
+		if s.AggressiveMode then
+			card.sub.Text = string.format("Range %d \226\128\162 Aggressive", s.Range)
+		else
+			card.sub.Text = string.format("Range %d \226\128\162 Face %d", s.Range, s.FaceSensitivity)
+		end
 	end
 	sync()
 
@@ -6133,7 +6205,7 @@ do
 
 	addCheckbox(card, "Aggressive Mode", "zap",
 		function() return s.AggressiveMode end,
-		function(v) s.AggressiveMode = v end)
+		function(v) s.AggressiveMode = v; sync() end)
 
 	addCheckbox(card, "Button Parry", "mouse-pointer-click",
 		function() return FloatingParryButtonEnabled end,
@@ -6484,6 +6556,85 @@ State.StunObj = (function()
 		return string.find(team, "killer", 1, true) ~= nil
 	end
 
+	-- ===== Stun Sound: bunyi saat killer baru kena stun, TANPA batas jarak =====
+	-- Sound ditaruh di SoundService (bukan di kepala killer), jadi tidak ada rolloff jarak:
+	-- sejauh apa pun killer yang kena stun, suaranya tetap terdengar penuh.
+	local SoundService = game:GetService("SoundService")
+	local STUN_SOUND_LIST = {
+		{ "Default",       "18843924331" },
+		{ "Clash Royale",  "114072050006157" },
+		{ "Blash",         "89068385567682" },
+		{ "antek asing",   "129760109847577" },
+		{ "hidup Jokowi",  "116121992738402" },
+		{ "Kururin Kuru",  "119896940405402" },
+		{ "Spongebob",     "6835794541" },
+		{ "Fahhhh",        "123562480982353" },
+		{ "Aughhh",        "9095205664" },
+		{ "iPhone",        "4203251375" },
+		{ "Siren",         "130677853589923" },
+		{ "an anime",      "128090092396552" },
+	}
+	local stunSoundIds, stunSoundNames = {}, {}
+	for _, e in ipairs(STUN_SOUND_LIST) do
+		stunSoundIds[e[1]] = e[2]
+		table.insert(stunSoundNames, e[1])
+	end
+	State.StunSound = { Enabled = false, Selected = "Default", Volume = 150 } -- Volume dalam %
+	State.StunSoundNames = stunSoundNames
+
+	local liveSounds = {}
+	local function playStunSound()
+		local SS = State.StunSound
+		local id = stunSoundIds[SS.Selected] or stunSoundIds.Default
+		pcall(function()
+			local snd = Instance.new("Sound")
+			snd.Name = "KinonStunSound"
+			snd.SoundId = "rbxassetid://" .. tostring(id)
+			snd.Volume = math.clamp((tonumber(SS.Volume) or 150) / 100, 0, 5)
+			snd.PlaybackSpeed = 1
+			snd.Parent = SoundService
+			liveSounds[snd] = true
+			local function cleanup()
+				liveSounds[snd] = nil
+				pcall(function() snd:Destroy() end)
+			end
+			snd.Ended:Connect(cleanup)
+			task.delay(6, cleanup)
+			snd:Play()
+		end)
+	end
+	function obj.PreviewStunSound() playStunSound() end
+
+	local stunSeen = setmetatable({}, { __mode = "k" })
+	local stunPrimed = false
+	-- dicek tiap frame (bukan tiap 0.1 detik) supaya suara tepat saat stun mulai
+	track(RunService.Heartbeat:Connect(function()
+		local SS = State.StunSound
+		if unloaded or not SS.Enabled then
+			if stunPrimed then stunPrimed = false; table.clear(stunSeen) end
+			return
+		end
+		local firstPass = not stunPrimed
+		stunPrimed = true
+		local shouldPlay = false
+		for _, p in ipairs(Players:GetPlayers()) do
+			local char = p.Character
+			if p ~= LP and char and isKillerPlayer(p) then
+				local ok, stunned = pcall(isStunned, char)
+				if ok and stunned then
+					if not stunSeen[char] then
+						stunSeen[char] = true
+						-- saat baru diaktifkan, killer yang SUDAH stun tidak dibunyikan
+						if not firstPass then shouldPlay = true end
+					end
+				else
+					stunSeen[char] = nil
+				end
+			end
+		end
+		if shouldPlay then playStunSound() end
+	end))
+
 	local function destroyEntry(char, animate)
 		local e = cache[char]
 		if not e then return end
@@ -6606,11 +6757,14 @@ State.StunObj = (function()
 
 	function obj.Destroy()
 		obj.Clear(false)
+		State.StunSound.Enabled = false
+		for snd in pairs(liveSounds) do pcall(function() snd:Destroy() end) end
+		table.clear(liveSounds)
 	end
 
 	track(RunService.Heartbeat:Connect(function(dt)
 		acc = acc + dt
-		if acc < 0.1 then return end
+		if acc < 0.05 then return end
 		acc = 0
 
 		local S = State.ESPPlayer
@@ -6650,6 +6804,464 @@ State.StunObj = (function()
 	return obj
 end)()
 
+-- Killer Hit Area (petak area serang di lantai bawah killer) + Attack Line (garis putih saat killer menyerang)
+State.HitAreaObj = (function()
+	local obj = {}
+	local RANGE, ANGLE = 10, 90
+	local SEG = 10
+	local EDGE_STEPS = 4
+	local DASH, GAP, DASH_MAX = 1.4, 1.0, 40
+	local MAX_DIST = 160
+	local LINE_LEN, LINE_LINGER = 50, 0.18 -- panjang maksimal Attack Line: 50 studs
+	local HIDDEN_DASH_ID = "73681849513551"
+	local SPEAR_CHARGE_IDS = { ["101443662521580"] = true, ["127622545856523"] = true } -- Veil Spear Throw 1 / 2
+	local SPEAR_NOT_CHARGE_IDS = { ["71001061734896"] = true, ["129669521834246"] = true } -- Take Out / Put Away Spear
+
+	local HA = {
+		Color = Color3.fromRGB(0, 0, 0),
+		FillColor = Color3.fromRGB(128, 128, 128),
+		Pool = {}, FloorY = {},
+	}
+	obj.Settings = HA
+
+	-- Dipakai untuk cari lantai (area) dan tabrakan (garis serang). Semua karakter pemain diabaikan.
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.RespectCanCollide = true
+
+	local function isKiller(plr)
+		local team = plr.Team and string.lower(plr.Team.Name) or ""
+		if string.find(team, "killer", 1, true) then return true end
+		local ch = plr.Character
+		if ch and (ch:GetAttribute("MorphedKiller") or ch:GetAttribute("Role") == "Killer"
+			or ch:GetAttribute("IsKiller") == true) then
+			return true
+		end
+		return false
+	end
+
+	local function newLine()
+		local p = Instance.new("Part")
+		p.Name = "KinonHitArea"
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanTouch = false
+		p.CanQuery = false
+		p.CastShadow = false
+		p.Material = Enum.Material.Neon
+		p.Color = HA.Color
+		p.Transparency = 0.05
+		p.Size = Vector3.new(0.2, 0.1, 0.2)
+		p.Parent = workspace
+		return p
+	end
+
+	local function newWedge()
+		local w = Instance.new("WedgePart")
+		w.Name = "KinonHitFill"
+		w.Anchored = true
+		w.CanCollide = false
+		w.CanTouch = false
+		w.CanQuery = false
+		w.CastShadow = false
+		w.Material = Enum.Material.SmoothPlastic
+		w.Color = HA.FillColor
+		w.Transparency = 0.4
+		w.Size = Vector3.new(0.04, 0.1, 0.1)
+		w.Parent = workspace
+		return w
+	end
+
+	local function newAttackPart(name, cylinder)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanTouch = false
+		p.CanQuery = false
+		p.CastShadow = false
+		p.Material = Enum.Material.Neon
+		p.Color = Color3.new(1, 1, 1)
+		p.Transparency = 1
+		if cylinder then p.Shape = Enum.PartType.Cylinder end
+		p.Size = Vector3.new(0.1, 0.1, 0.1)
+		p.Parent = workspace
+		return p
+	end
+
+	-- Gambar segitiga datar dari dua WedgePart.
+	local function setTri(w1, w2, a, b, c, thick)
+		local ab, ac, bc = b - a, c - a, c - b
+		local abd, acd, bcd = ab:Dot(ab), ac:Dot(ac), bc:Dot(bc)
+		if abd > acd and abd > bcd then
+			c, a = a, c
+		elseif acd > bcd and acd > abd then
+			a, b = b, a
+		end
+		ab, ac, bc = b - a, c - a, c - b
+		local cr = ac:Cross(ab)
+		if cr.Magnitude < 1e-4 or bc.Magnitude < 1e-4 then
+			w1.Transparency = 1; w2.Transparency = 1
+			return
+		end
+		local right = cr.Unit
+		local up = bc:Cross(right).Unit
+		local back = bc.Unit
+		local height = math.abs(ab:Dot(up))
+		w1.Transparency = 0.4; w2.Transparency = 0.4
+		w1.Size = Vector3.new(thick, height, math.abs(ab:Dot(back)))
+		w1.CFrame = CFrame.fromMatrix((a + b) / 2, right, up, back)
+		w2.Size = Vector3.new(thick, height, math.abs(ac:Dot(back)))
+		w2.CFrame = CFrame.fromMatrix((a + c) / 2, -right, up, -back)
+	end
+
+	local function lineSeg(part, a, b, thick)
+		local d = (b - a).Magnitude
+		if d < 0.01 then part.Transparency = 1; return end
+		part.Transparency = 0.05
+		part.Size = Vector3.new(thick, 0.1, d)
+		part.CFrame = CFrame.lookAt((a + b) / 2, b)
+	end
+
+	-- Titik di lantai pada (x, z): garis menempel ke tanah/tangga/tanjakan, bukan datar di satu tinggi.
+	local function groundPoint(x, z, floorY)
+		local res = workspace:Raycast(Vector3.new(x, floorY + 3, z), Vector3.new(0, -9, 0), rayParams)
+		local y = floorY
+		if res and math.abs(res.Position.Y - floorY) <= 2.5 then y = res.Position.Y end
+		return Vector3.new(x, y + 0.1, z)
+	end
+
+	-- Sisi lurus dari fromP ke toP dengan titik-titik yang menempel di lantai.
+	local function edgePoints(fromP, toP, floorY)
+		local pts = { fromP }
+		for i = 1, EDGE_STEPS - 1 do
+			local t = i / EDGE_STEPS
+			pts[#pts + 1] = groundPoint(
+				fromP.X + (toP.X - fromP.X) * t,
+				fromP.Z + (toP.Z - fromP.Z) * t,
+				floorY)
+		end
+		pts[#pts + 1] = toP
+		return pts
+	end
+
+	-- Titik pada polyline berdasarkan jarak s dari ujung awal.
+	local function pointAt(pts, cum, s)
+		local n = #pts
+		if s <= 0 then return pts[1] end
+		if s >= cum[n] then return pts[n] end
+		local i = 2
+		while cum[i] < s do i = i + 1 end
+		local seg = cum[i] - cum[i - 1]
+		local t = seg > 1e-6 and (s - cum[i - 1]) / seg or 0
+		return pts[i - 1]:Lerp(pts[i], t)
+	end
+
+	-- Putus-putus untuk satu sisi: panjang dash dipas supaya sisi selalu diawali dan diakhiri dash
+	-- (sudut tampak menyambung, jarak antar dash rata, tidak bergeser-geser saat killer bergerak).
+	local function dashSide(lines, idx, pts, thick)
+		local cum = { 0 }
+		for i = 2, #pts do cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).Magnitude end
+		local total = cum[#pts]
+		if total < 0.2 then return idx end
+		local n = math.max(1, math.floor((total + GAP) / (DASH + GAP) + 0.5))
+		local period = (total + GAP) / n
+		local dashLen = math.max(0.3, period - GAP)
+		for k = 0, n - 1 do
+			if idx >= DASH_MAX then break end
+			local a = pointAt(pts, cum, k * period)
+			local b = pointAt(pts, cum, k * period + dashLen)
+			idx = idx + 1
+			lineSeg(lines[idx], a, b, thick)
+			lines[idx].Color = HA.Color
+		end
+		return idx
+	end
+
+	-- Area (garis putus-putus + isi)
+	local function ensureArea(lines)
+		if lines.hasArea then return end
+		lines.hasArea = true
+		for i = 1, DASH_MAX do lines[i] = newLine() end
+	end
+
+	local function dropArea(lines)
+		if not lines.hasArea then return end
+		lines.hasArea = false
+		for i = 1, DASH_MAX do
+			local l = lines[i]
+			if l then pcall(function() l:Destroy() end); lines[i] = nil end
+		end
+		if lines.fill then
+			for _, w in ipairs(lines.fill) do pcall(function() w:Destroy() end) end
+			lines.fill = nil
+		end
+		lines.lastXZ = nil
+	end
+
+	-- Garis serang (putih lurus + bulatan di titik tabrak)
+	local function hideAttack(lines)
+		local atk = lines.atk
+		if atk then
+			atk.line.Transparency = 1
+			atk.dot.Transparency = 1
+		end
+	end
+
+	local function destroyAttack(lines)
+		local atk = lines.atk
+		if atk then
+			pcall(function() atk.line:Destroy() end)
+			pcall(function() atk.dot:Destroy() end)
+			lines.atk = nil
+		end
+	end
+
+	local function drawAttack(lines, origin, dir, camPos)
+		local atk = lines.atk
+		if not atk then
+			atk = {
+				line = newAttackPart("KinonAttackLine", false),
+				dot = newAttackPart("KinonAttackDot", true),
+			}
+			lines.atk = atk
+		end
+		local res = workspace:Raycast(origin, dir * LINE_LEN, rayParams)
+		local len = res and (res.Position - origin).Magnitude or LINE_LEN
+		if len < 0.3 then
+			hideAttack(lines)
+			return
+		end
+		local thick = math.clamp((origin - camPos).Magnitude * 0.004, 0.12, 0.3)
+		atk.line.Size = Vector3.new(thick, thick, len)
+		atk.line.CFrame = CFrame.lookAt(origin + dir * (len / 2), origin + dir * len)
+		atk.line.Transparency = 0.1
+
+		if res then
+			-- bulatan menempel di permukaan yang tertabrak
+			local dsz = math.clamp((res.Position - camPos).Magnitude * 0.02, 0.9, 2.2)
+			local pos = res.Position + res.Normal * 0.03
+			atk.dot.Size = Vector3.new(0.05, dsz, dsz)
+			atk.dot.CFrame = CFrame.lookAt(pos, pos + res.Normal) * CFrame.Angles(0, math.rad(90), 0)
+			atk.dot.Transparency = 0.1
+		else
+			atk.dot.Transparency = 1
+		end
+	end
+
+	-- Killer sedang memutar animasi serangan? (id animasi sama dengan yang dipakai Auto Parry)
+	local function isAttacking(char)
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not animator then return false end
+		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if not ok or not tracks then return false end
+		local isVeil = char:GetAttribute("MorphedKiller") == "Veil" or char:GetAttribute("Veil") == true
+			or string.find(string.lower(char.Name), "veil", 1, true) ~= nil
+		for _, t in ipairs(tracks) do
+			local id = KINON_AnimationId(t)
+
+			-- Hidden Dash: garis muncul selama dash berlangsung.
+			if id == HIDDEN_DASH_ID then
+				local playing, pos = false, 0
+				pcall(function() playing = t.IsPlaying; pos = t.TimePosition or 0 end)
+				if playing and pos <= 1.5 then return true end
+			end
+
+			-- Spear Charger (Veil): garis muncul selama charge / lempar tombak.
+			if id ~= "" and SPEAR_CHARGE_IDS[id] then
+				local playing = false
+				pcall(function() playing = t.IsPlaying end)
+				if playing then return true end
+			elseif isVeil and id ~= "" and not SPEAR_NOT_CHARGE_IDS[id] then
+				local label = ""
+				pcall(function()
+					label = string.lower(tostring(t.Name or "") .. " " .. tostring(t.Animation and t.Animation.Name or ""))
+				end)
+				if label:find("charge", 1, true) or label:find("throw", 1, true) then
+					local playing = false
+					pcall(function() playing = t.IsPlaying end)
+					if playing then return true end
+				end
+			end
+
+			if id ~= "" and not KINON_IgnoredParryAnimationIds[id] and not VD_NO_PARRY_ANIMS[id] then
+				local optional = VD_OPTIONAL_ATTACK_ANIMS[id]
+				if optional or KINON_ParryAnimationIds[id] then
+					local playing, pos = false, 0
+					pcall(function() playing = t.IsPlaying; pos = t.TimePosition or 0 end)
+					if playing and pos <= (optional and 1.2 or 0.55) then return true end
+				end
+			end
+		end
+		return false
+	end
+
+	local function release(plr)
+		local lines = HA.Pool[plr]
+		if lines then
+			dropArea(lines)
+			destroyAttack(lines)
+			HA.Pool[plr] = nil
+		end
+		HA.FloorY[plr] = nil
+	end
+
+	local function releaseAll()
+		for plr in pairs(HA.Pool) do release(plr) end
+	end
+
+	local function step(dt, wantArea, wantLine)
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local camPos = cam.CFrame.Position
+		local now = os.clock()
+		local fillOn = false -- isi warna di dalam Hit Area dihapus (kosong, hanya garis tepi)
+
+		-- Abaikan semua karakter pemain (supaya lantai tidak "naik" ke badan orang lain).
+		local filter = { cam }
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl.Character then filter[#filter + 1] = pl.Character end
+		end
+		rayParams.FilterDescendantsInstances = filter
+
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local char = plr.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hrp and hum and hum.Health > 0 and isKiller(plr) and (hrp.Position - camPos).Magnitude <= MAX_DIST then
+				local lines = HA.Pool[plr]
+				if not lines then
+					lines = {}
+					HA.Pool[plr] = lines
+				end
+
+				-- Arah hadap dihaluskan (posisi killer dari jaringan datang patah-patah).
+				local look = hrp.CFrame.LookVector
+				local flat = Vector3.new(look.X, 0, look.Z)
+				if flat.Magnitude < 0.01 then flat = Vector3.new(0, 0, -1) end
+				flat = flat.Unit
+				local alpha = 1 - math.exp(-(dt or 0.016) * 20)
+				local sFlat = lines.smFlat
+				if not sFlat then
+					sFlat = flat
+				else
+					sFlat = sFlat:Lerp(flat, alpha)
+					if sFlat.Magnitude < 0.01 then sFlat = flat end
+					sFlat = sFlat.Unit
+				end
+				lines.smFlat = sFlat
+
+				-- 1) Petak area di lantai
+				if wantArea then
+					ensureArea(lines)
+
+					-- Lantai di bawah kaki: ukur dari posisi kaki, bukan dari HumanoidRootPart.
+					local hip = (hum.HipHeight and hum.HipHeight > 0) and hum.HipHeight or 2
+					local feetY = hrp.Position.Y - (hip + hrp.Size.Y / 2)
+					local origin = Vector3.new(hrp.Position.X, feetY + 1.5, hrp.Position.Z)
+					local floorHit = workspace:Raycast(origin, Vector3.new(0, -14, 0), rayParams)
+					local targetY = floorHit and floorHit.Position.Y or feetY
+					local prevY = HA.FloorY[plr]
+					local floorY
+					if prevY and math.abs(targetY - prevY) < 2.5 then
+						floorY = prevY + (targetY - prevY) * 0.4 -- haluskan supaya tidak loncat-loncat
+					else
+						floorY = targetY
+					end
+					HA.FloorY[plr] = floorY
+
+					local apexXZ = Vector3.new(hrp.Position.X, 0, hrp.Position.Z)
+					local sXZ = lines.smXZ
+					if not sXZ or (sXZ - apexXZ).Magnitude > 12 then sXZ = apexXZ else sXZ = sXZ:Lerp(apexXZ, alpha) end
+					lines.smXZ = sXZ
+
+					-- Tidak ada perubahan -> tidak perlu menggambar ulang (hemat FPS).
+					local unchanged = lines.lastXZ ~= nil and (lines.lastXZ - sXZ).Magnitude < 0.004
+						and math.abs((lines.lastFloorY or 0) - floorY) < 0.01
+						and lines.lastFlat ~= nil and lines.lastFlat:Dot(sFlat) > 0.99995
+						and lines.lastFill == fillOn and lines.lastColor == HA.Color and lines.lastFillColor == HA.FillColor
+					if not unchanged then
+						lines.lastXZ, lines.lastFloorY, lines.lastFlat = sXZ, floorY, sFlat
+						lines.lastFill, lines.lastColor, lines.lastFillColor = fillOn, HA.Color, HA.FillColor
+
+						local ax, az = sXZ.X, sXZ.Z
+						local apexP = Vector3.new(ax, floorY + 0.1, az)
+
+						-- Titik busur, masing-masing ditempelkan ke lantai.
+						local arc = {}
+						for k = 0, SEG do
+							local ang = math.rad(-ANGLE / 2 + ANGLE * (k / SEG))
+							local d = (CFrame.Angles(0, ang, 0) * sFlat) * RANGE
+							arc[k + 1] = groundPoint(ax + d.X, az + d.Z, floorY)
+						end
+						local left = edgePoints(apexP, arc[1], floorY)
+						local right = edgePoints(arc[SEG + 1], apexP, floorY)
+
+						-- Garis tepi putus-putus (- - -): sisi kiri, busur, sisi kanan.
+						local thick = math.clamp((apexP - camPos).Magnitude * 0.006, 0.18, 0.45)
+						local idx = dashSide(lines, 0, left, thick)
+						idx = dashSide(lines, idx, arc, thick)
+						idx = dashSide(lines, idx, right, thick)
+						for i = idx + 1, DASH_MAX do lines[i].Transparency = 1 end
+
+						if fillOn then
+							if not lines.fill then
+								lines.fill = {}
+								for i = 1, SEG * 2 do lines.fill[i] = newWedge() end
+							end
+							local fy = Vector3.new(0, -0.04, 0)
+							for k = 1, SEG do
+								setTri(lines.fill[k * 2 - 1], lines.fill[k * 2], apexP + fy, arc[k] + fy, arc[k + 1] + fy, 0.04)
+							end
+							for _, w in ipairs(lines.fill) do w.Color = HA.FillColor end
+						elseif lines.fill then
+							for _, w in ipairs(lines.fill) do pcall(function() w:Destroy() end) end
+							lines.fill = nil
+						end
+					end
+				else
+					dropArea(lines)
+				end
+
+				-- 2) Garis lurus putih saat killer menyerang (+ bulatan kalau kena objek)
+				if wantLine then
+					if isAttacking(char) then lines.attackUntil = now + LINE_LINGER end
+					if (lines.attackUntil or 0) > now then
+						drawAttack(lines, hrp.Position, sFlat, camPos)
+					else
+						hideAttack(lines)
+					end
+				else
+					destroyAttack(lines)
+				end
+			else
+				release(plr)
+			end
+		end
+	end
+
+	track(RunService.RenderStepped:Connect(function(dt)
+		if unloaded then return end
+		local S = State.ESPPlayer
+		local area = S.Enabled and S.HitArea == true
+		local line = S.Enabled and S.AttackLine == true
+		if not area and not line then
+			if next(HA.Pool) then releaseAll() end
+			return
+		end
+		if not pcall(step, dt, area, line) then releaseAll() end
+	end))
+
+	track(Players.PlayerRemoving:Connect(function(plr) release(plr) end))
+
+	function obj:Destroy()
+		releaseAll()
+	end
+
+	return obj
+end)()
+
 do
 	local s = State.ESPPlayer
 	local esp = State.PlayerESPObj
@@ -6674,6 +7286,27 @@ do
 	addCheckbox(card, "Stun Indicator", "zap",
 		function() return s.StunInd == true end,
 		function(v) s.StunInd = v end)
+	local ss = State.StunSound
+	addCheckbox(card, "Stun Sound", "volume-2",
+		function() return ss.Enabled == true end,
+		function(v) ss.Enabled = v end)
+	addDropdown(card, "Stun Sound Type", "music", State.StunSoundNames,
+		function(v) return v end,
+		function() return ss.Selected end,
+		function(v) ss.Selected = v; pcall(State.StunObj.PreviewStunSound) end)
+	addSlider(card, "Stun Sound Volume %", "volume-2", 10, 500,
+		function() return math.clamp(math.floor(tonumber(ss.Volume) or 150), 10, 500) end,
+		function(v) ss.Volume = v end)
+
+	local hit = State.HitAreaObj
+	addCheckbox(card, "Killer Hit Area", "target",
+		function() return s.HitArea == true end,
+		function(v) s.HitArea = v end,
+		function() return hit.Settings.Color end,
+		function(c) hit.Settings.Color = c end)
+	addCheckbox(card, "Attack Line", "move-right",
+		function() return s.AttackLine == true end,
+		function(v) s.AttackLine = v end)
 end
 
 do
@@ -7336,6 +7969,9 @@ do
 	addCheckbox(card, "Predict", "move",
 		function() return s.Predict end,
 		function(v) s.Predict = v end)
+	addSlider(card, "Predict Lead %", "gauge", 50, 250,
+		function() return math.clamp(math.floor(tonumber(s.LeadScale) or 100), 50, 250) end,
+		function(v) s.LeadScale = v end)
 	addCheckbox(card, "Show FOV Circle", "circle",
 		function() return s.ShowCircle end,
 		function(v) s.ShowCircle = v end)
@@ -8149,6 +8785,7 @@ local function unload()
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
 	pcall(function() State.SilentObj:Destroy() end)
+	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
 	pcall(function()
