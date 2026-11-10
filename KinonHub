@@ -4452,8 +4452,15 @@ end
 
 local function KINON_FindParryClient()
 	local function usable(value)
-		return type(value) == "table" and type(value.Parry) == "function"
-			and value.tool and value.tool.Parent
+		if type(value) ~= "table" or type(value.Parry) ~= "function" then return false end
+		if not (value.tool and value.tool.Parent) then return false end
+		local owner = rawget(value, "player")
+		if owner ~= nil and owner ~= LP then return false end
+		if type(value._isEquipped) == "function" then
+			local ok, equipped = pcall(value._isEquipped, value)
+			if ok and equipped ~= true then return false end
+		end
+		return true
 	end
 	if usable(KINON_ParryEngine.ActiveClient) then return KINON_ParryEngine.ActiveClient end
 	if usable(_G.KINON_ActiveParryClient) then
@@ -4493,7 +4500,7 @@ local function KINON_FindParryClient()
 		end)
 	end
 
-	if typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 3 then
+	if typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 1.5 then
 		KINON_ParryEngine.LastGcScan = tick()
 		local ok, objects = pcall(function() return getgc(true) end)
 		if ok and type(objects) == "table" then
@@ -4669,7 +4676,17 @@ local function KINON_TryParry(reason, killerRoot)
 	end
 
 	local client = KINON_FindParryClient()
-	if client and (client.isParryOnCooldown or client.isParryResolving) then return false end
+	if client then
+		if client.isParryResolving and tick() - (KINON_ParryEngine.LastSuccess or 0) > 3 then
+			pcall(function() client.isParryResolving = false end)
+		end
+		if type(client.CanUse) == "function" then
+			local okUse, canUse = pcall(client.CanUse, client)
+			if okUse and canUse == false then return false end
+		elseif client.isParryOnCooldown or client.isParryResolving then
+			return false
+		end
+	end
 	-- tightened from 0.10 so quick follow-up swings aren't missed
 	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.06 then return false end
 
@@ -4688,6 +4705,10 @@ local function KINON_TryParry(reason, killerRoot)
 			if restoreFacing then restoreFacing(true) end
 			return true
 		end
+		KINON_ParryEngine.ActiveClient = nil
+		_G.KINON_ActiveParryClient = nil
+		_G.VD_ActiveParryClient = nil
+		KINON_ParryEngine.LastGcScan = 0
 		if restoreFacing then restoreFacing(false) end
 		return false
 	end
@@ -4710,34 +4731,34 @@ local function KINON_TryParry(reason, killerRoot)
 	return false
 end
 
-local KINON_PARRY_RANGE_MARGIN = 1
+local KINON_PARRY_RANGE_MARGIN = 2
 
 local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, measuredVel)
 	if not killerRoot or not playerRoot then return false end
-	local targetPosition = positionOverride or killerRoot.Position
-	local distance = (targetPosition - playerRoot.Position).Magnitude
-	local range = math.clamp(tonumber(Parry.Range) or 14, 5, 35) + KINON_PARRY_RANGE_MARGIN
-	if distance > range and not positionOverride then
-		local extra = 0
+	local limit = math.clamp(tonumber(Parry.Range) or 14, 5, 35) + KINON_PARRY_RANGE_MARGIN
+	local from = playerRoot.Position
+	local target = positionOverride or killerRoot.Position
+	local distance = (target - from).Magnitude
+	local inRange = distance <= limit
+	if not inRange and not positionOverride then
 		pcall(function()
-			local toPlayer = playerRoot.Position - killerRoot.Position
-			if toPlayer.Magnitude > 0.01 then
-				local dirToPlayer = toPlayer.Unit
-
-				local killerVel = killerRoot.AssemblyLinearVelocity or Vector3.zero
-				if measuredVel and measuredVel.Magnitude > killerVel.Magnitude then killerVel = measuredVel end
-				local playerVel = playerRoot.AssemblyLinearVelocity or Vector3.zero
-				local closing = math.max(30, killerVel:Dot(dirToPlayer) - playerVel:Dot(dirToPlayer))
+			local toPlayer = from - killerRoot.Position
+			if toPlayer.Magnitude < 0.01 then return end
+			local dir = toPlayer.Unit
+			local killerVel = killerRoot.AssemblyLinearVelocity or Vector3.zero
+			if measuredVel and measuredVel.Magnitude > killerVel.Magnitude then killerVel = measuredVel end
+			local playerVel = playerRoot.AssemblyLinearVelocity or Vector3.zero
+			local closing = killerVel:Dot(dir) - playerVel:Dot(dir)
+			if closing > 28 then
 				local ping = 0.05
 				local okPing, value = pcall(function() return LP:GetNetworkPing() end)
 				if okPing and type(value) == "number" then ping = value end
-
-				extra = math.clamp(closing * ping, 0, 3)
+				local reach = math.min(closing * math.clamp(ping + 0.06, 0.06, 0.2), 8)
+				if distance - reach <= limit then inRange = true end
 			end
 		end)
-		range = range + extra
 	end
-	if distance > range then return false end
+	if not inRange then return false end
 	if not KINON_ShouldPassFaceCheck(killerRoot, playerRoot) then return false end
 	return true
 end
@@ -4796,7 +4817,9 @@ local function KINON_HandleAttackTrack(animTrack, model)
 					local okPing, value = pcall(function() return LP:GetNetworkPing() end)
 					if okPing and type(value) == "number" then ping = value end
 					local lead = math.clamp(ping + 0.1, 0.08, 0.35)
-					hit = KINON_InRangeAndFacing(killerRoot, playerRoot, killerRoot.Position + vel * lead, vel)
+					local shift = vel * lead
+					if shift.Magnitude > 10 then shift = shift.Unit * 10 end
+					hit = KINON_InRangeAndFacing(killerRoot, playerRoot, killerRoot.Position + shift, vel)
 				end
 				if hit and KINON_TryParry("Animation " .. animationId, killerRoot) then return end
 			end
