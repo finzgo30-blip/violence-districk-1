@@ -1034,7 +1034,7 @@ State.SpearObj = (function()
 		if tracker.char ~= char then tracker.char, tracker.samples = char, {} end
 		local smp = tracker.samples
 		smp[#smp + 1] = { t = now, p = hrp.Position }
-		while #smp > 2 and now - smp[1].t > 0.32 do table.remove(smp, 1) end
+		while #smp > 2 and now - smp[1].t > 0.24 do table.remove(smp, 1) end
 	end
 
 	local function windowVelocity(smp, window)
@@ -1044,7 +1044,7 @@ State.SpearObj = (function()
 			if last.t - smp[i].t >= window then first = smp[i]; break end
 		end
 		local dt = last.t - first.t
-		if dt < 0.04 then return nil end
+		if dt < 0.03 then return nil end
 		return (last.p - first.p) / dt
 	end
 
@@ -1053,9 +1053,11 @@ State.SpearObj = (function()
 		local liveFlat = Vector3.new(live.X, 0, live.Z)
 		local smp = tracker.samples
 		if tracker.char == char and #smp >= 4 then
-			local vLong = windowVelocity(smp, 0.30)
-			local vShort = windowVelocity(smp, 0.14)
-			local vNow = windowVelocity(smp, 0.10) or vShort
+			-- Tightened windows (was 0.30 / 0.14 / 0.10): reacts to a direction
+			-- change faster instead of averaging in stale movement.
+			local vLong = windowVelocity(smp, 0.22)
+			local vShort = windowVelocity(smp, 0.10)
+			local vNow = windowVelocity(smp, 0.06) or vShort
 			if vLong and vShort and vNow then
 				local flatLong = Vector3.new(vLong.X, 0, vLong.Z)
 				local flatShort = Vector3.new(vShort.X, 0, vShort.Z)
@@ -1080,8 +1082,9 @@ State.SpearObj = (function()
 					if cosA < 0.5 and liveFlat.Magnitude > 1 and flatShort.Unit:Dot(liveFlat.Unit) > 0.5 then
 						vel = (vNow + live) * 0.5
 					else
-						vel = vLong * 0.3 + vShort * 0.7
-						if liveFlat.Magnitude > 2 then vel = vel * 0.6 + live * 0.4 end
+						-- Weighted further toward recent motion (was 0.3 / 0.7).
+						vel = vLong * 0.2 + vShort * 0.8
+						if liveFlat.Magnitude > 2 then vel = vel * 0.55 + live * 0.45 end
 					end
 				end
 				if vel.Magnitude > BAL.VelMagCap then vel = vel.Unit * BAL.VelMagCap end
@@ -1106,16 +1109,18 @@ State.SpearObj = (function()
 		local dist = (hrp.Position - origin).Magnitude
 		local far = math.clamp((dist - 40) / 40, 0, 1)
 		local sliderSpeed = math.clamp(tonumber(V.SpearSpeed) or 180, 60, 180)
-		local farSpeed = math.min(isAuraMode(LP.Character) and 170 or 150, sliderSpeed)
+		-- Long-range throws used to get slowed down to ~150-170, which capped
+		-- the real max distance well under 280 studs no matter the slider.
+		-- Far throws now get a small boost instead of a cut, so reach actually
+		-- scales with the Speed slider.
+		local farSpeed = math.max(isAuraMode(LP.Character) and 215 or 195, sliderSpeed)
 		local maxSpeed = sliderSpeed + (farSpeed - sliderSpeed) * far
-		-- Close-range spear prediction: use nearly full target velocity,
-		-- then cap the look-ahead time so the aim point does not run too far ahead.
-		local leadMul = 0.98 + 0.05 * far
+		-- Prediction is kept useful at close range without excessive forward leading.
+		local leadMul = 0.9 + (1.18 - 0.9) * far
 		local speed = math.clamp((chargeTime or BAL.FullChargeTime) * maxSpeed, 1, maxSpeed)
 		local gravity = getGravity()
 		local gMag = math.abs(gravity.Y)
-		local halfPing = math.clamp(getPingHalf() + 0.02 + 0.025 * far, 0.02, 0.095)
-		local maxLeadTime = dist <= 45 and 0.18 or 0.34
+		local halfPing = math.clamp(getPingHalf() + 0.025 + 0.045 * far, 0.035, 0.12)
 
 		local aimTarget = hrp.Position + Vector3.new(0, 0.2, 0)
 		if dist > 100 then
@@ -1124,9 +1129,9 @@ State.SpearObj = (function()
 				aimTarget = head.Position
 			end
 		end
-		-- Do not fade prediction just because the target is close.
-		-- The lead-time cap above controls how far ahead the spear is aimed.
-		local vel = clampVelY(estimateVelocity(targetChar, hrp)) * leadMul
+		-- Close targets still receive prediction, but the lead stays compact.
+		local nearMul = 0.55 + 0.35 * math.clamp((dist - 8) / 52, 0, 1)
+		local vel = clampVelY(estimateVelocity(targetChar, hrp)) * leadMul * nearMul
 		if V.Predict == false then vel = Vector3.zero end
 
 		local function solveTime(spd)
@@ -1134,8 +1139,9 @@ State.SpearObj = (function()
 			local tt = math.max(0.04, delta0.Magnitude / spd)
 			local ok = true
 			for _ = 1, 8 do
-				local leadTime = math.clamp(tt + halfPing, 0.025, maxLeadTime)
-				local leadPos = aimTarget + vel * leadTime
+				local maxLeadTime = dist <= 35 and 0.28 or 0.40
+			local leadTime = math.clamp(tt + halfPing, 0.04, maxLeadTime)
+			local leadPos = aimTarget + vel * leadTime
 				local d = leadPos - origin
 				local dxz = Vector3.new(d.X, 0, d.Z).Magnitude
 				local dy = d.Y
@@ -1168,7 +1174,8 @@ State.SpearObj = (function()
 			end
 		end
 
-		local finalLead = aimTarget + vel * math.clamp(t + halfPing, 0.025, maxLeadTime)
+		local maxLeadTime = dist <= 35 and 0.28 or 0.40
+		local finalLead = aimTarget + vel * math.clamp(t + halfPing, 0.04, maxLeadTime)
 		local delta = finalLead - origin
 
 		if not reachable and gMag > 0.001 then
@@ -1958,12 +1965,30 @@ State.SilentObj = (function()
 		isFiring, releaseUntil = false, 0
 	end
 
+	local mouseHeld = false
+	toolConns[#toolConns + 1] = track(UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			mouseHeld = true
+		end
+	end))
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			mouseHeld = false
+			releaseUntil = tick() + 0.12
+		end
+	end))
+
 	local function bindActiveTool(ch)
 		local tool = ch and ch:FindFirstChild("Twist of Fate")
 		if tool == activeTool then return end
 		clearToolConnections()
+		mouseHeld = false
 		if not (tool and tool:IsA("Tool")) then return end
 		activeTool = tool
+		-- Tool.Activated/Deactivated are kept as one source of truth; raw input
+		-- is the other, so the laser shows up even if this weapon's charge/fire
+		-- isn't routed through the standard Activated signal.
 		toolConns[#toolConns + 1] = tool.Activated:Connect(function()
 			isFiring = true
 			releaseUntil = 0
@@ -2014,7 +2039,11 @@ State.SilentObj = (function()
 		local half = math.rad(math.clamp((tonumber(T.FOV) or 120) / 2, 1, 85))
 		local halfV = math.rad(cam.FieldOfView) / 2
 		local r = (cam.ViewportSize.Y / 2) * math.tan(half) / math.tan(halfV)
-		return math.min(r, cam.ViewportSize.Magnitude)
+		-- Once the configured FOV cone is wider than the camera's own view,
+		-- the true geometric radius balloons past the edges of the screen and
+		-- the ring becomes invisible. Cap it so it always stays fully visible.
+		local visibleCap = math.min(cam.ViewportSize.X, cam.ViewportSize.Y) * 0.48
+		return math.clamp(r, 12, visibleCap)
 	end
 
 	local function hideLaser()
@@ -2027,7 +2056,7 @@ State.SilentObj = (function()
 			p.Name = "KINON_TOFSilentLaser"
 			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
 			p.Material = Enum.Material.Neon
-			p.Color = Color3.fromRGB(255, 0, 0)
+			p.Color = Color3.fromRGB(255, 60, 60)
 			p.Transparency = 1
 			p.Parent = workspace
 			laserPart = p
@@ -2054,7 +2083,8 @@ State.SilentObj = (function()
 		local ch = LP.Character
 		bindActiveTool(ch)
 		if not (activeTool and activeTool.Parent == ch) then return hideLaser() end
-		if not isFiring and tick() > releaseUntil then return hideLaser() end
+		local holding = isFiring or mouseHeld or tick() <= releaseUntil
+		if not holding then return hideLaser() end
 		local kc = killerChar()
 		local part = kc and targetPart(kc)
 		local from = muzzle(ch)
@@ -2100,6 +2130,7 @@ State.SilentObj = (function()
 	function obj:Destroy()
 		T.Enabled = false
 		clearToolConnections()
+		mouseHeld = false
 		restore()
 		if circleGui then pcall(function() circleGui:Destroy() end) end
 		if laserPart then pcall(function() laserPart:Destroy() end) end
@@ -4622,7 +4653,8 @@ end
 
 local function KINON_TryParry(reason, killerRoot)
 	if unloaded or not Parry.Enabled then return false end
-	if tick() - KINON_ParryEngine.LastAttempt < 0.012 then return false end
+	-- tightened from 0.012 for faster back-to-back reactions
+	if tick() - KINON_ParryEngine.LastAttempt < 0.008 then return false end
 	if not KINON_GetParryTool() then return false end
 	if KINON_IsBusyInteracting() then return false end
 
@@ -4638,7 +4670,8 @@ local function KINON_TryParry(reason, killerRoot)
 
 	local client = KINON_FindParryClient()
 	if client and (client.isParryOnCooldown or client.isParryResolving) then return false end
-	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.10 then return false end
+	-- tightened from 0.10 so quick follow-up swings aren't missed
+	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.06 then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
 	local restoreFacing = nil
@@ -4848,7 +4881,7 @@ task.spawn(function()
 					if animator then KINON_HookAnimator(animator, model) end
 				end
 			end
-			task.wait(0.1)
+			task.wait(0.05) -- tightened from 0.1 for faster hook/re-equip after a new killer model appears
 		else
 			task.wait(0.35)
 		end
@@ -7277,12 +7310,6 @@ end
 do
 	local s = State.TOFSilent
 	local card = addCard(11, "eye", "Silent Aim Twist of Fate", "", "TOFSilent")
-	addCheckbox(card, "Enable Visuals", "eye",
-		function() return s.Enabled end,
-		function(v)
-			s.Enabled = v
-			if State.SilentObj then State.SilentObj:Refresh() end
-		end)
 	addCheckbox(card, "Predict", "move",
 		function() return s.Predict end,
 		function(v) s.Predict = v end)
