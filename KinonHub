@@ -1711,9 +1711,6 @@ State.TOFSilent = {
 	Enabled = false,
 	FOV = 120,
 	Predict = false,
-	LeadScale = 100, -- kekuatan prediksi (%)
-	ShowCircle = true,
-	ShowLaser = true,
 }
 
 State.TOFObj = (function()
@@ -1883,26 +1880,35 @@ end
 State.SilentObj = (function()
 	local T = State.TOFSilent
 	local obj = {}
+	local BULLET_SPEED = 800
+	local PREDICT_ITERATIONS = 3
+	local PRIORITY = { "UpperTorso", "Torso" }
 	local effects, original
 	local installing = false
+	local killerChar, skinModel
+	local circleGui, circleFrame, circleStroke
+	local lastScan, lastStatus = 0, 0
+	local lastText
 
-	local function killerChar()
+	local function findKillerChar()
 		for _, p in ipairs(Players:GetPlayers()) do
-			if p ~= LP and p.Character then
-				local team = p.Team and string.lower(p.Team.Name) or ""
-				if string.find(team, "killer", 1, true) or p.Character:FindFirstChild("Lookscriptkiller", true) then
-					return p.Character
-				end
+			if p ~= LP and p.Character and p.Character:FindFirstChild("Lookscriptkiller", true) then
+				return p.Character
 			end
 		end
 		return nil
 	end
 
-	local function targetPart(ch)
-		return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
+	local function getTargetPart(ch)
+		if not ch then return nil end
+		for _, n in ipairs(PRIORITY) do
+			local part = ch:FindFirstChild(n)
+			if part then return part end
+		end
+		return nil
 	end
 
-	local function skinModel()
+	local function detectSkin()
 		local ch = LP.Character
 		local tool = ch and ch:FindFirstChild("Twist of Fate")
 		local arm = tool and tool:FindFirstChild("Right Arm")
@@ -1913,284 +1919,73 @@ State.SilentObj = (function()
 		return nil
 	end
 
-	-- Pistol dianggap "dipegang" kalau tool ada di Character atau item aktif game = Twist of Fate.
-	local function hasTOF(ch)
-		if not ch then return false end
-		if ch:FindFirstChild("Twist of Fate") then return true end
-		local eq = string.lower(tostring(LP:GetAttribute("EquippedItem") or ""))
-		return eq:find("twist", 1, true) ~= nil or eq:find("fate", 1, true) ~= nil
-	end
-
-	local function muzzle(ch)
-		local skin = skinModel()
-		if skin then
-			local smoke = skin:FindFirstChild("SmokePart", true)
+	local function getMuzzle(ch)
+		if not ch then return nil end
+		if skinModel and skinModel.Parent then
+			local smoke = skinModel:FindFirstChild("SmokePart", true)
 			if smoke and smoke:IsA("BasePart") then return smoke.Position end
-			local barrel = skin:FindFirstChild("barrel", true)
+			local barrel = skinModel:FindFirstChild("barrel", true)
 			if barrel and barrel:IsA("BasePart") then return barrel.Position end
-			if skin.PrimaryPart then return skin.PrimaryPart.Position end
+			if skinModel.PrimaryPart then return skinModel.PrimaryPart.Position end
 		end
-		local tool = ch and ch:FindFirstChild("Twist of Fate", true)
-		local arm = tool and tool:FindFirstChild("Right Arm")
-		local gun = arm and (arm:FindFirstChild("gun") or arm:FindFirstChild("EmperorGun"))
-		if gun and gun:IsA("BasePart") then return gun.Position end
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		local hrp = ch:FindFirstChild("HumanoidRootPart")
 		if hrp then return (hrp.CFrame * CFrame.new(0.7, 1.373, -2.5)).Position end
 		return nil
 	end
 
-	local PROJ_SPEED = 800
-	local LEAD_MAX_TIME = 0.5   -- sebelumnya 0.14: terlalu kecil, tembakan ke killer yang jalan selalu kurang lead
-	local LEAD_MAX_DIST = 16    -- sebelumnya 4.5
-	local NEAR_START = 1        -- sebelumnya 6: lead baru penuh di 20 stud, jadi jarak dekat/menengah meleset
-	local NEAR_FULL = 5         -- sebelumnya 20
-	local INTERP_DELAY = 0.05   -- delay interpolasi posisi pemain lain di layar
-	local HISTORY_WINDOW = 0.12
-	local HISTORY_KEEP = 0.4
-	local VEL_CAP = 44
-	local Y_VEL_CLAMP = 14
-	local TELEPORT_STEP = 12
-	local history = setmetatable({}, { __mode = "k" })
-
-	local function record(part, now)
-		local list = history[part]
-		if not list then
-			list = {}
-			history[part] = list
-		end
-		local pos = part.Position
-		local last = list[#list]
-		if last and (pos - last.p).Magnitude > TELEPORT_STEP then
-			table.clear(list)
-		end
-		list[#list + 1] = { t = now, p = pos }
-		while #list > 2 and now - list[1].t > HISTORY_KEEP do
-			table.remove(list, 1)
-		end
-	end
-
-	local function limitVel(v)
-		v = Vector3.new(v.X, math.clamp(v.Y, -Y_VEL_CLAMP, Y_VEL_CLAMP), v.Z)
-		if v.Magnitude > VEL_CAP then v = v.Unit * VEL_CAP end
-		return v
-	end
-
-	local function getVelocity(part)
-		local list = history[part]
-		if list and #list >= 2 then
-			local newest = list[#list]
-			local oldest = newest
-			for i = #list - 1, 1, -1 do
-				if newest.t - list[i].t <= HISTORY_WINDOW then
-					oldest = list[i]
-				else
-					break
-				end
-			end
-			local dt = newest.t - oldest.t
-			if dt > 0.02 then
-				return limitVel((newest.p - oldest.p) / dt)
-			end
-		end
-		return limitVel(part.AssemblyLinearVelocity or Vector3.zero)
-	end
-
-	-- GetNetworkPing sudah round-trip: posisi killer di layar tertinggal setengah ping, tembakan butuh
-	-- setengah ping lagi sampai server. Total = 1x ping + interpolasi (bukan 2x ping, itu bikin lead kelebihan).
-	local function latencyLead()
-		local ok, ping = pcall(function() return LP:GetNetworkPing() end)
-		local rtt = (ok and type(ping) == "number" and ping > 0) and math.clamp(ping, 0.02, 0.4) or 0.08
-		return rtt + INTERP_DELAY
-	end
-
-	track(RunService.Heartbeat:Connect(function()
-		if unloaded or not (T.Enabled and T.Predict) then return end
-		local kc = killerChar()
-		local part = kc and targetPart(kc)
-		if part then record(part, os.clock()) end
-	end))
-
-	local function aimPoint(part, from)
-		local pos = part.Position
-		if not T.Predict then return pos end
-		local ch = part.Parent
-		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-		local vel = (hrp and hrp.AssemblyLinearVelocity) or part.AssemblyLinearVelocity or Vector3.zero
-		if vel.Magnitude < 1 then return pos end
-		local t = (pos - from).Magnitude / PROJ_SPEED
-		local predicted = pos
-		for _ = 1, 3 do
-			predicted = pos + vel * t
-			t = (predicted - from).Magnitude / PROJ_SPEED
-		end
-		local scale = math.clamp((tonumber(T.LeadScale) or 100) / 100, 0.3, 3)
-		return pos + (predicted - pos) * scale
-	end
-
-	local function inFov(pos)
-		local cam = workspace.CurrentCamera
-		if not cam then return false end
-		local to = pos - cam.CFrame.Position
-		if to.Magnitude < 0.1 then return true end
-		local dot = math.clamp(cam.CFrame.LookVector:Dot(to.Unit), -1, 1)
-		return math.deg(math.acos(dot)) <= (tonumber(T.FOV) or 120) / 2
-	end
-
-	local function compute(character)
-		local kc = killerChar()
-		local part = kc and targetPart(kc)
-		if not part then return nil end
-		local from = muzzle(character)
-		if not from then return nil end
-		local pos = aimPoint(part, from)
-		if not inFov(pos) then return nil end
-		local d = pos - from
-		if d.Magnitude < 0.01 then return nil end
-		return d.Unit
-	end
-
-	local circleGui, circleFrame, laserPart
-	local activeTool, toolConns = nil, {}
-	local isFiring, releaseUntil = false, 0
-	local lastAimDir, lastAimAt = nil, 0
-
-	local function clearToolConnections()
-		for _, c in ipairs(toolConns) do pcall(function() c:Disconnect() end) end
-		table.clear(toolConns)
-		activeTool = nil
-		isFiring, releaseUntil = false, 0
-	end
-
-	local triggerTrail -- diisi setelah fireTrail dibuat
-	local mouseHeld = false
-	toolConns[#toolConns + 1] = track(UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then return end
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			mouseHeld = true
-		end
-	end))
-	track(UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			local was = mouseHeld
-			mouseHeld = false
-			releaseUntil = tick() + 0.12
-			if was and triggerTrail then triggerTrail() end
-		end
-	end))
-
-	-- Lintasan peluru Twist of Fate: red laser LURUS (bukan lengkung) dari moncong sampai kena objek / 500 stud.
-	local BULLET_LASER_MAX, BULLET_LASER_LIFETIME = 500, 0.6
-	local function fireTrail(ch)
-		if unloaded or not (T.Enabled and T.ShowLaser) or not ch then return end
-		local from = muzzle(ch)
-		if not from then return end
-		local dir
-		if lastAimDir and tick() - lastAimAt < 0.5 then
-			dir = lastAimDir
-		else
-			local good, d = pcall(compute, ch)
-			if good and d then dir = d end
-		end
-		if not dir then
-			local cam = workspace.CurrentCamera
-			dir = cam and cam.CFrame.LookVector
-		end
-		if typeof(dir) ~= "Vector3" or dir.Magnitude < 0.01 then return end
-		dir = dir.Unit
-
+	local function checkWall(origin, targetPos)
+		local direction = targetPos - origin
+		if direction.Magnitude < 0.1 then return false end
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.RespectCanCollide = true
-		params.FilterDescendantsInstances = { ch }
-		local hit = workspace:Raycast(from, dir * BULLET_LASER_MAX, params)
-		local endPos = hit and hit.Position or (from + dir * BULLET_LASER_MAX)
-		local len = (endPos - from).Magnitude
-		if len < 0.5 then return end
-
-		local cam = workspace.CurrentCamera
-		local camPos = cam and cam.CFrame.Position or from
-		local thick = math.clamp((from - camPos).Magnitude * 0.004, 0.1, 0.3)
-		local beam = Instance.new("Part")
-		beam.Name = "KINON_TOFBulletLaser"
-		beam.Anchored, beam.CanCollide, beam.CanQuery, beam.CanTouch, beam.CastShadow = true, false, false, false, false
-		beam.Material = Enum.Material.Neon
-		beam.Color = Color3.fromRGB(255, 30, 30)
-		beam.Transparency = 0.05
-		beam.Size = Vector3.new(thick, thick, len)
-		beam.CFrame = CFrame.lookAt(from + dir * (len / 2), endPos)
-		beam.Parent = workspace
-
-		task.spawn(function()
-			local start = os.clock()
-			while beam.Parent and not unloaded do
-				local alpha = (os.clock() - start) / BULLET_LASER_LIFETIME
-				if alpha >= 1 then break end
-				beam.Transparency = 0.05 + alpha * 0.95
-				RunService.Heartbeat:Wait()
-			end
-			pcall(function() beam:Destroy() end)
-		end)
-	end
-
-	local lastTrailAt = 0
-	triggerTrail = function()
-		if tick() - lastTrailAt < 0.3 then return end
-		local ch = LP.Character
-		if not (T.Enabled and T.ShowLaser and hasTOF(ch)) then return end
-		lastTrailAt = tick()
-		task.defer(fireTrail, ch)
-	end
-
-	-- Tombol aksi mobile: lepas tombol = menembak -> laser live diganti lintasan peluru.
-	task.spawn(function()
-		local curBtn, btnConns = nil, {}
-		while not unloaded do
-			pcall(function()
-				local cur = LP:FindFirstChild("PlayerGui")
-				for seg in string.gmatch("Survivor-mob.Controls.Gui-mob", "[^%.]+") do
-					cur = cur and cur:FindFirstChild(seg)
-				end
-				if cur and cur ~= curBtn then
-					for _, c in ipairs(btnConns) do pcall(function() c:Disconnect() end) end
-					btnConns = {}
-					curBtn = cur
-					btnConns[#btnConns + 1] = cur.InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.Touch
-							or input.UserInputType == Enum.UserInputType.MouseButton1 then
-							if triggerTrail then triggerTrail() end
-						end
-					end)
-				end
-			end)
-			task.wait(1)
+		params.IgnoreWater = true
+		local exclude = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Character then table.insert(exclude, p.Character) end
 		end
-		for _, c in ipairs(btnConns) do pcall(function() c:Disconnect() end) end
-	end)
+		if skinModel then table.insert(exclude, skinModel) end
+		params.FilterDescendantsInstances = exclude
+		return workspace:Raycast(origin, direction, params) ~= nil
+	end
 
-	local function bindActiveTool(ch)
-		local tool = ch and ch:FindFirstChild("Twist of Fate")
-		if tool == activeTool then return end
-		clearToolConnections()
-		mouseHeld = false
-		if not (tool and tool:IsA("Tool")) then return end
-		activeTool = tool
-		-- Tool.Activated/Deactivated are kept as one source of truth; raw input
-		-- is the other, so the laser shows up even if this weapon's charge/fire
-		-- isn't routed through the standard Activated signal.
-		toolConns[#toolConns + 1] = tool.Activated:Connect(function()
-			isFiring = true
-			releaseUntil = 0
-		end)
-		toolConns[#toolConns + 1] = tool.Deactivated:Connect(function()
-			isFiring = false
-			-- Keep the beam visible for a brief release frame, then hide it.
-			releaseUntil = tick() + 0.12
-			if triggerTrail then triggerTrail() end
-		end)
-		toolConns[#toolConns + 1] = tool.Unequipped:Connect(function()
-			isFiring = false
-			releaseUntil = 0
-		end)
+	local function isInFOV(targetPos)
+		local cam = workspace.CurrentCamera
+		if not cam then return false end
+		local toTarget = targetPos - cam.CFrame.Position
+		if toTarget.Magnitude < 0.1 then return true end
+		local dot = math.clamp(cam.CFrame.LookVector:Dot(toTarget.Unit), -1, 1)
+		return math.deg(math.acos(dot)) <= (T.FOV / 2)
+	end
+
+	local function predictPosition(ch, muzzlePos)
+		local part = getTargetPart(ch)
+		if not part then return nil end
+		local hrp = ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return part.Position end
+		local vel = hrp.AssemblyLinearVelocity
+		if vel.Magnitude < 1 then return part.Position end
+		local current = part.Position
+		local timeToHit = (current - muzzlePos).Magnitude / BULLET_SPEED
+		local predicted = current
+		for _ = 1, PREDICT_ITERATIONS do
+			local future = current + vel * timeToHit
+			timeToHit = (future - muzzlePos).Magnitude / BULLET_SPEED
+			predicted = future
+		end
+		return predicted
+	end
+
+	local function getEffectiveTargetPos(muzzlePos)
+		local part = getTargetPart(killerChar)
+		if not part then return nil end
+		if T.Predict then return predictPosition(killerChar, muzzlePos) end
+		return part.Position
+	end
+
+	local function setStatus(text, color)
+		if text == lastText then return end
+		lastText = text
+		if State.TOFSilentStatus then pcall(State.TOFSilentStatus, text, color) end
 	end
 
 	local function ensureCircle()
@@ -2215,98 +2010,72 @@ State.SilentObj = (function()
 		corner.Parent = f
 		local stroke = Instance.new("UIStroke")
 		stroke.Color = Color3.fromRGB(255, 255, 255)
-		stroke.Thickness = 1.5
-		stroke.Transparency = 0.2
+		stroke.Thickness = 2
+		stroke.Transparency = 0.15
 		stroke.Parent = f
-		local ok = pcall(function() sg.Parent = parent end)
-		if not ok then return false end
-		circleGui, circleFrame = sg, f
+		if not pcall(function() sg.Parent = parent end) then return false end
+		circleGui, circleFrame, circleStroke = sg, f, stroke
 		return true
 	end
 
-	local function circleRadius(cam)
-		local half = math.rad(math.clamp((tonumber(T.FOV) or 120) / 2, 1, 85))
-		local halfV = math.rad(cam.FieldOfView) / 2
-		local r = (cam.ViewportSize.Y / 2) * math.tan(half) / math.tan(halfV)
-		-- Once the configured FOV cone is wider than the camera's own view,
-		-- the true geometric radius balloons past the edges of the screen and
-		-- the ring becomes invisible. Cap it so it always stays fully visible.
-		local visibleCap = math.min(cam.ViewportSize.X, cam.ViewportSize.Y) * 0.48
-		return math.clamp(r, 12, visibleCap)
-	end
-
-	local function hideLaser()
-		if laserPart then laserPart.Transparency = 1 end
-	end
-
-	local function updateLaser(from, to)
-		if not (laserPart and laserPart.Parent) then
-			local p = Instance.new("Part")
-			p.Name = "KINON_TOFSilentLaser"
-			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
-			p.Material = Enum.Material.Neon
-			p.Color = Color3.fromRGB(255, 60, 60)
-			p.Transparency = 1
-			p.Parent = workspace
-			laserPart = p
-		end
-		local dist = (to - from).Magnitude
-		if dist < 0.5 then return hideLaser() end
-		local thick = math.clamp(dist * 0.002, 0.12, 0.6) -- makin panjang makin tebal supaya tetap terlihat
-		laserPart.Size = Vector3.new(thick, thick, dist)
-		laserPart.CFrame = CFrame.lookAt((from + to) / 2, to)
-		laserPart.Transparency = 0.2
-	end
-
-	local aimRay = RaycastParams.new()
-	aimRay.FilterType = Enum.RaycastFilterType.Exclude
-	aimRay.RespectCanCollide = true
-
-	-- Laser merah live: dari moncong lurus searah bidik silent aim, berhenti di objek pertama yang kena.
-	local function drawAimLaser(ch, from, dir)
-		aimRay.FilterDescendantsInstances = { ch }
-		local res = workspace:Raycast(from, dir * BULLET_LASER_MAX, aimRay)
-		updateLaser(from, res and res.Position or (from + dir * BULLET_LASER_MAX))
-	end
+	local WHITE = Color3.fromRGB(255, 255, 255)
+	local GREEN = Color3.fromRGB(50, 255, 50)
+	local RED = Color3.fromRGB(255, 50, 50)
 
 	track(RunService.RenderStepped:Connect(function()
-		local active = T.Enabled and not unloaded
-		local cam = workspace.CurrentCamera
-		if active and T.ShowCircle and cam and ensureCircle() then
-			circleGui.Enabled = true
-			local r = circleRadius(cam)
-			circleFrame.Size = UDim2.fromOffset(r * 2, r * 2)
-		elseif circleGui then
-			circleGui.Enabled = false
+		if unloaded or not T.Enabled then
+			if circleGui then circleGui.Enabled = false end
+			return
+		end
+		if not ensureCircle() then return end
+		circleGui.Enabled = true
+		local radius = T.FOV * 2
+		circleFrame.Size = UDim2.fromOffset(radius, radius)
+
+		if not skinModel or not skinModel.Parent then skinModel = detectSkin() end
+		local now = tick()
+		if now - lastScan > 0.25 or not (killerChar and killerChar.Parent) then
+			lastScan = now
+			killerChar = findKillerChar()
 		end
 
-		if not active or not T.ShowLaser then return hideLaser() end
-		local ch = LP.Character
-		bindActiveTool(ch)
-		if not hasTOF(ch) then return hideLaser() end
-		-- Sesaat setelah menembak: laser live diganti lintasan peluru (fireTrail).
-		if tick() - lastTrailAt < 0.35 then return hideLaser() end
-		local from = muzzle(ch)
-		if not from then return hideLaser() end
-		local good, dir = pcall(compute, ch)
-		if not (good and typeof(dir) == "Vector3") then
-			dir = nil
-			if cam then
-				aimRay.FilterDescendantsInstances = { ch }
-				local hit = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * BULLET_LASER_MAX, aimRay)
-				local target = hit and hit.Position or (cam.CFrame.Position + cam.CFrame.LookVector * BULLET_LASER_MAX)
-				local d = target - from
-				dir = d.Magnitude > 0.5 and d.Unit or cam.CFrame.LookVector
-			end
+		if not killerChar then
+			circleStroke.Color = WHITE
+			return setStatus("Status: Scanning...", Color3.fromRGB(255, 200, 50))
 		end
-		if not dir then return hideLaser() end
-		pcall(drawAimLaser, ch, from, dir)
+		if not getTargetPart(killerChar) then
+			circleStroke.Color = WHITE
+			return setStatus("Status: No body part", Color3.fromRGB(255, 100, 100))
+		end
+		local muzzlePos = getMuzzle(LP.Character)
+		if not muzzlePos then
+			circleStroke.Color = WHITE
+			return setStatus("Status: No muzzle", Color3.fromRGB(160, 160, 160))
+		end
+		local targetPos = getEffectiveTargetPos(muzzlePos)
+		if not targetPos then
+			circleStroke.Color = WHITE
+			return
+		end
+		if not isInFOV(targetPos) then
+			circleStroke.Color = WHITE
+			return setStatus("Status: Out of FOV", Color3.fromRGB(255, 200, 50))
+		end
+		if now - lastStatus < 0.1 then return end
+		lastStatus = now
+		local blocked = checkWall(muzzlePos, targetPos)
+		circleStroke.Color = blocked and RED or GREEN
+		local cam = workspace.CurrentCamera
+		local dist = cam and math.floor((targetPos - cam.CFrame.Position).Magnitude) or 0
+		setStatus(string.format("LOCKED | %dm | %s%s", dist, blocked and "BLOCKED" or "CLEAR", T.Predict and " | PREDICT" or ""),
+			blocked and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100))
 	end))
 
 	local function restore()
 		if effects and original then
 			pcall(function() effects.aimDirection = original end)
 		end
+		effects, original = nil, nil
 	end
 
 	local function install()
@@ -2321,14 +2090,14 @@ State.SilentObj = (function()
 				if type(orig) ~= "function" then error("no aimDirection") end
 				e.aimDirection = function(character, camCF)
 					if unloaded or not T.Enabled then return orig(character, camCF) end
-					local good, dir = pcall(compute, character)
-					if good and dir then
-						lastAimDir, lastAimAt = dir, tick()
-						return dir
-					end
-					local res = orig(character, camCF)
-					if typeof(res) == "Vector3" then lastAimDir, lastAimAt = res, tick() end
-					return res
+					local muzzlePos = getMuzzle(character)
+					if not muzzlePos then return orig(character, camCF) end
+					local targetPos = getEffectiveTargetPos(muzzlePos)
+					if not targetPos then return orig(character, camCF) end
+					if not isInFOV(targetPos) then return orig(character, camCF) end
+					local direction = targetPos - muzzlePos
+					if direction.Magnitude < 0.01 then return orig(character, camCF) end
+					return direction.Unit
 				end
 				effects, original = e, orig
 			end)
@@ -2338,16 +2107,20 @@ State.SilentObj = (function()
 	end
 
 	function obj:Refresh()
-		if T.Enabled then install() end
+		if T.Enabled then
+			skinModel = detectSkin()
+			install()
+		else
+			if circleGui then circleGui.Enabled = false end
+			lastText = nil
+			if State.TOFSilentStatus then pcall(State.TOFSilentStatus, "Status: Disabled", Color3.fromRGB(160, 160, 160)) end
+		end
 	end
 
 	function obj:Destroy()
 		T.Enabled = false
-		clearToolConnections()
-		mouseHeld = false
 		restore()
 		if circleGui then pcall(function() circleGui:Destroy() end) end
-		if laserPart then pcall(function() laserPart:Destroy() end) end
 	end
 
 	return obj
@@ -8573,22 +8346,16 @@ end
 
 do
 	local s = State.TOFSilent
-	local card = addCard(12, "eye", "Silent Aim Twist of Fate", "", "TOFSilent")
-	addCheckbox(card, "Predict", "move",
+	local card = addCard(12, "eye", "Silent Aim Twist of Fate", "Status: Disabled", "TOFSilent")
+	State.TOFSilentStatus = function(text)
+		card.sub.Text = text
+	end
+	addCheckbox(card, "Predict Move", "move",
 		function() return s.Predict end,
 		function(v) s.Predict = v end)
-	addSlider(card, "Predict Lead %", "gauge", 50, 250,
-		function() return math.clamp(math.floor(tonumber(s.LeadScale) or 100), 50, 250) end,
-		function(v) s.LeadScale = v end)
-	addCheckbox(card, "Show FOV Circle", "circle",
-		function() return s.ShowCircle end,
-		function(v) s.ShowCircle = v end)
-	addCheckbox(card, "Red Laser", "scan-line",
-		function() return s.ShowLaser end,
-		function(v) s.ShowLaser = v end)
-	addSlider(card, "Silent Aim FOV", "ruler", 10, 360,
-		function() return math.clamp(math.floor(tonumber(s.FOV) or 120), 10, 360) end,
-		function(v) s.FOV = v end)
+	addSlider(card, "FOV", "ruler", 10, 360,
+		function() return math.clamp(math.floor((tonumber(s.FOV) or 120) / 10 + 0.5) * 10, 10, 360) end,
+		function(v) s.FOV = math.clamp(math.floor(v / 10 + 0.5) * 10, 10, 360) end)
 end
 
 do
