@@ -3268,7 +3268,7 @@ State.SkillCheckObj = (function()
 	local DEFAULT_CFG = {
 		Enabled = false,
 		Mode = "Legit",
-		BusyResetDelay = 0.15,
+		BusyResetDelay = 0.05,
 		InstantOffset = 109,
 		LegitMinOffset = 102, LegitMaxOffset = 116,
 		NormalMinOffset = 116, NormalMaxOffset = 140,
@@ -3298,33 +3298,35 @@ State.SkillCheckObj = (function()
 
 	function Class:_fireAction()
 		local btn = self:_getActionButton()
-		local touch = UserInputService.TouchEnabled
 
-		if touch and btn and btn:IsA("GuiObject") then
+		if btn and btn:IsA("GuiObject") and btn.Visible and type(firesignal) == "function" then
+			local ok = pcall(function()
+				firesignal(btn.MouseButton1Down)
+				task.wait(0.005)
+				firesignal(btn.MouseButton1Up)
+			end)
+			if ok then return true end
+		end
+
+		if btn and btn:IsA("GuiObject") and btn.Visible then
 			local ok = pcall(function()
 				local ap, as = btn.AbsolutePosition, btn.AbsoluteSize
 				local inset = GuiService:GetGuiInset()
+				local id = 8822 + math.random(1, 9999)
 				local x = ap.X + as.X / 2 + inset.X
 				local y = ap.Y + as.Y / 2 + inset.Y
-				VirtualInputManager:SendTouchEvent(8822, 0, x, y)
-				task.wait(0.01)
-				VirtualInputManager:SendTouchEvent(8822, 2, x, y)
+				VirtualInputManager:SendTouchEvent(id, 0, x, y)
+				task.wait(0.005)
+				VirtualInputManager:SendTouchEvent(id, 2, x, y)
 			end)
 			if ok then return true end
 		end
 
 		pcall(function()
 			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait()
+			task.wait(0.005)
 			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
 		end)
-
-		if btn and btn:IsA("GuiObject") and type(firesignal) == "function" then
-			pcall(function()
-				firesignal(btn.MouseButton1Down)
-				firesignal(btn.MouseButton1Up)
-			end)
-		end
 		return true
 	end
 
@@ -3337,51 +3339,10 @@ State.SkillCheckObj = (function()
 		return minA <= lineRot and lineRot <= maxA
 	end
 
-	function Class:_safetyProgress()
-		local now = os.clock()
-		if now - (self._genScanAt or 0) > 6 then
-			self._genScanAt = now
-			local list = {}
-			local map = workspace:FindFirstChild("Map")
-			if map then
-				for _, d in ipairs(map:GetDescendants()) do
-					if d:IsA("Model") and string.lower(d.Name) == "generator" then
-						table.insert(list, d)
-					end
-				end
-			end
-			self._gens = list
-		end
-		local char = LP.Character
-		local root = char and char:FindFirstChild("HumanoidRootPart")
-		if not root then return 0 end
-		local best, bestDist = 0, 45
-		for _, g in ipairs(self._gens or {}) do
-			if g.Parent then
-				local part = g.PrimaryPart or g:FindFirstChildWhichIsA("BasePart")
-				if part then
-					local d = (part.Position - root.Position).Magnitude
-					if d < bestDist then
-						bestDist = d
-						best = tonumber(g:GetAttribute("RepairProgress")) or 0
-					end
-				end
-			end
-		end
-		return best
-	end
-
-	function Class:_shouldSnapInstant()
-		local m = self.Settings.Mode
-		if m == "Instant" then return true end
-		if m == "Safety" then return self:_safetyProgress() < 90 end
-		return false
-	end
-
 	function Class:_shouldFireByRange(lineRot, goalRot)
 		local S = self.Settings
 		local m = S.Mode
-		if m == "Normal" or m == "Safety" then
+		if m == "Normal" then
 			return self:_inAngleRange(lineRot, goalRot, S.NormalMinOffset, S.NormalMaxOffset)
 		end
 		return self:_inAngleRange(lineRot, goalRot, S.LegitMinOffset, S.LegitMaxOffset)
@@ -3406,15 +3367,7 @@ State.SkillCheckObj = (function()
 		local trapB = check:FindFirstChild("TrapGoal")
 		if (trapA and trapA.Visible) or (trapB and trapB.Visible) then return end
 
-		local fireNow = false
-		if self:_shouldSnapInstant() then
-			pcall(function()
-				line.Rotation = goal.Rotation + self.Settings.InstantOffset
-			end)
-			fireNow = true
-		else
-			fireNow = self:_shouldFireByRange(line.Rotation % 360, goal.Rotation % 360)
-		end
+		local fireNow = self:_shouldFireByRange(line.Rotation % 360, goal.Rotation % 360)
 
 		if not fireNow then return end
 
@@ -3453,7 +3406,7 @@ State.SkillCheckObj = (function()
 		self.Settings.Enabled = true
 		if self._heartbeat then return end
 		self:_hookKingScourge()
-		self._heartbeat = RunService.RenderStepped:Connect(function()
+		self._heartbeat = RunService.Heartbeat:Connect(function()
 			if unloaded then return end
 			pcall(function() self:_onHeartbeat() end)
 		end)
@@ -3474,7 +3427,7 @@ State.SkillCheckObj = (function()
 	end
 
 	function Class:SetMode(mode)
-		local valid = { Legit = true, Instant = true, Normal = true, Safety = true }
+		local valid = { Legit = true, Normal = true }
 		if not valid[mode] then return false end
 		self.Settings.Mode = mode
 		self._randomModeIsNormal = false
@@ -6474,7 +6427,7 @@ do
 	end
 end
 
-State.SkillCheckTrap = { On = false, Mode = "Legit" }
+State.SkillCheckTrap = { On = false }
 do
 	local T = State.SkillCheckTrap
 	local conn
@@ -6485,42 +6438,60 @@ do
 		if a > b then return lineRot >= a or lineRot <= b end
 		return lineRot >= a and lineRot <= b
 	end
+	local prevRot, prevAt
+	local function sweepHit(prev, cur, goal)
+		local d = ((cur - prev + 540) % 360) - 180
+		local steps = math.max(1, math.ceil(math.abs(d) / 3))
+		for k = 0, steps do
+			if inRange((prev + d * k / steps) % 360, goal) then return true end
+		end
+		return false
+	end
 	local function step()
-		if unloaded or not T.On or busy then return end
+		if unloaded or not T.On then return end
 		local pg = LP:FindFirstChildOfClass("PlayerGui")
 		if not pg then return end
+		local seen = false
 		for _, name in ipairs({ "SkillCheckPromptGui", "SkillCheckPromptGui-con" }) do
 			local prompt = pg:FindFirstChild(name)
 			if prompt and prompt.Enabled ~= false then
 				local check = prompt:FindFirstChild("Check")
 				if check and check.Visible then
 					local line = check:FindFirstChild("Line")
-					if not line then return end
+					if not line then break end
 					local target
 					for _, tn in ipairs({ "TrapPerfect", "TrapGoal" }) do
 						local c = check:FindFirstChild(tn)
 						if c and c.Visible then target = c; break end
 					end
-					if not target then return end
-					local press = false
-					if T.Mode == "Instant" then
-						line.Rotation = target.Rotation + 109
-						press = true
-					else
-						press = inRange(line.Rotation % 360, target.Rotation % 360)
+					if not target then break end
+					seen = true
+					local now = os.clock()
+					local cur = line.Rotation % 360
+					local goal = target.Rotation % 360
+					local press = inRange(cur, goal)
+					if prevRot and prevAt and now - prevAt < 0.2 and now > prevAt then
+						local dt = now - prevAt
+						local d = ((cur - prevRot + 540) % 360) - 180
+						local w = d / dt
+						local lead = math.clamp(dt + 0.01, 0.016, 0.06)
+						if not press and inRange((cur + w * lead) % 360, goal) then press = true end
+						if not press and sweepHit(prevRot, cur, goal) then press = true end
 					end
-					if press then
+					prevRot, prevAt = cur, now
+					if press and not busy then
 						busy = true
 						task.spawn(function()
 							pcall(function() State.SkillCheckObj:_fireAction() end)
-							task.wait(T.Mode == "Instant" and 0.4 or 0.05)
+							task.wait(0.05)
 							busy = false
 						end)
 					end
-					return
+					break
 				end
 			end
 		end
+		if not seen then prevRot, prevAt = nil, nil end
 	end
 	State.TrapSkillSet = function(v)
 		T.On = v == true
@@ -6536,7 +6507,7 @@ do
 	local card = addCard(0, "target", "Auto Skill Check", "", "SkillCheck")
 	local function sync() card.sub.Text = "Mode: " .. s.Mode end
 	sync()
-	addDropdown(card, "Mode", "list", { "Legit", "Instant", "Normal", "Safety" },
+	addDropdown(card, "Mode", "list", { "Legit", "Normal" },
 		function(v) return v end,
 		function() return s.Mode end,
 		function(v) obj:SetMode(v); sync() end)
@@ -6544,10 +6515,6 @@ do
 	addCheckbox(card, "Auto Trap Skill Check", "target",
 		function() return T.On end,
 		function(v) State.TrapSkillSet(v) end)
-	addDropdown(card, "Trap Mode", "list", { "Legit", "Instant" },
-		function(v) return v end,
-		function() return T.Mode end,
-		function(v) T.Mode = v end)
 end
 
 do
