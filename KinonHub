@@ -2013,21 +2013,18 @@ State.SilentObj = (function()
 	local function aimPoint(part, from)
 		local pos = part.Position
 		if not T.Predict then return pos end
-		local vel = getVelocity(part)
+		local ch = part.Parent
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		local vel = (hrp and hrp.AssemblyLinearVelocity) or part.AssemblyLinearVelocity or Vector3.zero
 		if vel.Magnitude < 1 then return pos end
-		local latency = latencyLead()
-		local leadTime = latency + (pos - from).Magnitude / PROJ_SPEED
+		local t = (pos - from).Magnitude / PROJ_SPEED
+		local predicted = pos
 		for _ = 1, 3 do
-			local predicted = pos + vel * leadTime
-			leadTime = latency + (predicted - from).Magnitude / PROJ_SPEED
+			predicted = pos + vel * t
+			t = (predicted - from).Magnitude / PROJ_SPEED
 		end
-		leadTime = math.min(leadTime, LEAD_MAX_TIME)
-		local dist = (pos - from).Magnitude
-		local near = math.clamp((dist - NEAR_START) / (NEAR_FULL - NEAR_START), 0, 1)
 		local scale = math.clamp((tonumber(T.LeadScale) or 100) / 100, 0.3, 3)
-		local lead = vel * leadTime * near * scale
-		if lead.Magnitude > LEAD_MAX_DIST then lead = lead.Unit * LEAD_MAX_DIST end
-		return pos + lead
+		return pos + (predicted - pos) * scale
 	end
 
 	local function inFov(pos)
@@ -3271,7 +3268,7 @@ State.SkillCheckObj = (function()
 	local DEFAULT_CFG = {
 		Enabled = false,
 		Mode = "Legit",
-		BusyResetDelay = 0.05,
+		BusyResetDelay = 0.15,
 		InstantOffset = 109,
 		LegitMinOffset = 102, LegitMaxOffset = 116,
 		NormalMinOffset = 116, NormalMaxOffset = 140,
@@ -3301,35 +3298,33 @@ State.SkillCheckObj = (function()
 
 	function Class:_fireAction()
 		local btn = self:_getActionButton()
+		local touch = UserInputService.TouchEnabled
 
-		if btn and btn:IsA("GuiObject") and btn.Visible and type(firesignal) == "function" then
-			local ok = pcall(function()
-				firesignal(btn.MouseButton1Down)
-				task.wait(0.005)
-				firesignal(btn.MouseButton1Up)
-			end)
-			if ok then return true end
-		end
-
-		if btn and btn:IsA("GuiObject") and btn.Visible then
+		if touch and btn and btn:IsA("GuiObject") then
 			local ok = pcall(function()
 				local ap, as = btn.AbsolutePosition, btn.AbsoluteSize
 				local inset = GuiService:GetGuiInset()
-				local id = 8822 + math.random(1, 9999)
 				local x = ap.X + as.X / 2 + inset.X
 				local y = ap.Y + as.Y / 2 + inset.Y
-				VirtualInputManager:SendTouchEvent(id, 0, x, y)
-				task.wait(0.005)
-				VirtualInputManager:SendTouchEvent(id, 2, x, y)
+				VirtualInputManager:SendTouchEvent(8822, 0, x, y)
+				task.wait(0.01)
+				VirtualInputManager:SendTouchEvent(8822, 2, x, y)
 			end)
 			if ok then return true end
 		end
 
 		pcall(function()
 			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait(0.005)
+			task.wait()
 			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
 		end)
+
+		if btn and btn:IsA("GuiObject") and type(firesignal) == "function" then
+			pcall(function()
+				firesignal(btn.MouseButton1Down)
+				firesignal(btn.MouseButton1Up)
+			end)
+		end
 		return true
 	end
 
@@ -3458,7 +3453,7 @@ State.SkillCheckObj = (function()
 		self.Settings.Enabled = true
 		if self._heartbeat then return end
 		self:_hookKingScourge()
-		self._heartbeat = RunService.Heartbeat:Connect(function()
+		self._heartbeat = RunService.RenderStepped:Connect(function()
 			if unloaded then return end
 			pcall(function() self:_onHeartbeat() end)
 		end)
