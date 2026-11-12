@@ -117,18 +117,78 @@ State.PlayerESPObj = (function()
 		return "HEALTHY", palette.Player, frac
 	end
 
-	function U.ItemIcon(itemName)
-		local items = ReplicatedStorage:FindFirstChild("Items")
-		if not items then return nil end
-		local it = items:FindFirstChild(itemName)
-		if not it then return nil end
-		local id
-		pcall(function() id = it.Texture or it.Image end)
-		if id and id ~= "" then
-			local n = tostring(id):match("%d+")
-			if n then return string.format("rbxthumb://type=Asset&id=%s&w=420&h=420", n) end
+	local iconCache, itemIndex, indexAt = {}, nil, 0
+	local ICON_PROPS = { "Texture", "TextureId", "Image", "ImageId", "Icon", "Thumbnail", "ThumbnailImage" }
+
+	local function toThumb(id)
+		if id == nil then return nil end
+		id = tostring(id)
+		if id == "" then return nil end
+		if string.find(id, "rbxthumb://", 1, true) then return id end
+		local n = id:match("%d+")
+		if n then return string.format("rbxthumb://type=Asset&id=%s&w=420&h=420", n) end
+		return nil
+	end
+
+	local function readIcon(inst)
+		for _, prop in ipairs(ICON_PROPS) do
+			local ok, v = pcall(function() return inst[prop] end)
+			if ok and type(v) == "string" then
+				local r = toThumb(v)
+				if r then return r end
+			end
+			local av = inst:GetAttribute(prop)
+			if type(av) == "string" or type(av) == "number" then
+				local r = toThumb(av)
+				if r then return r end
+			end
+		end
+		for _, d in ipairs(inst:GetDescendants()) do
+			if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+				local r = toThumb(d.Image)
+				if r then return r end
+			elseif d:IsA("Decal") or d:IsA("Texture") then
+				local r = toThumb(d.Texture)
+				if r then return r end
+			end
 		end
 		return nil
+	end
+
+	local function findItemInstance(name)
+		local items = ReplicatedStorage:FindFirstChild("Items")
+		local it = items and items:FindFirstChild(name)
+		if it then return it end
+		if not itemIndex or os.clock() - indexAt > 30 then
+			itemIndex, indexAt = {}, os.clock()
+			for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+				if d:IsA("Tool") or d:IsA("Folder") or d:IsA("Model") or d:IsA("Configuration") or d:IsA("StringValue") then
+					if not itemIndex[d.Name] then itemIndex[d.Name] = d end
+				end
+			end
+		end
+		return itemIndex[name]
+	end
+
+	function U.ItemIcon(itemName, plr)
+		if not itemName or itemName == "" then return nil end
+		local cached = iconCache[itemName]
+		if cached then return cached end
+		local icon
+		local it = findItemInstance(itemName)
+		if it then icon = readIcon(it) end
+		if not icon and plr then
+			local holders = { plr.Character, plr:FindFirstChildOfClass("Backpack") }
+			for _, h in ipairs(holders) do
+				local tool = h and h:FindFirstChild(itemName)
+				if tool then
+					icon = readIcon(tool)
+					if icon then break end
+				end
+			end
+		end
+		if icon then iconCache[itemName] = icon end
+		return icon
 	end
 
 	local function label(parent, name, size, font, order)
@@ -398,7 +458,16 @@ State.PlayerESPObj = (function()
 					end
 					if not killer and S.ShowItem then
 						local eq = plr:GetAttribute("EquippedItem")
-						if eq and eq ~= "" then icon = U.ItemIcon(eq) end
+						if not eq or eq == "" then
+							local tool = ch:FindFirstChildOfClass("Tool")
+							eq = tool and tool.Name or nil
+						end
+						if eq and eq ~= "" then
+							icon = U.ItemIcon(eq, plr)
+							if not icon then
+								name = name and (name .. " | " .. tostring(eq)) or tostring(eq)
+							end
+						end
 					end
 
 					local hooks = (not killer and S.HookCounter) and self:_hookCount(plr) or nil
@@ -601,6 +670,18 @@ State.WorldESPObj = (function()
 				end
 			elseif d:IsA("BasePart") and (string.lower(d.Name):find("pumpkin", 1, true) or (d.Parent and d.Parent.Name == "Pumpkins")) then
 				table.insert(self.Cache.Pumpkins, d)
+			end
+		end
+
+		local seenPallet = {}
+		for _, pl in ipairs(self.Cache.Pallets) do seenPallet[pl] = true end
+		local all = workspace:GetDescendants()
+		for i, d in ipairs(all) do
+			if i % 400 == 0 then task.wait() end
+			if (d.Name == "Pallet" or d.Name == "Palletwrong") and (d:IsA("Model") or d:IsA("BasePart"))
+				and not seenPallet[d] and not seenPallet[d.Parent] then
+				seenPallet[d] = true
+				table.insert(self.Cache.Pallets, d)
 			end
 		end
 	end
@@ -963,7 +1044,7 @@ State.SpearObj = (function()
 		local now = tick()
 		local c = velCache[char]
 		local raw
-		if c and c.lastPos and now - c.time > 0.001 and now - c.time < 0.5 then
+		if c and c.lastPos and now - c.time > 0.03 and now - c.time < 0.5 then
 			raw = (hrp.Position - c.lastPos) / (now - c.time)
 			local live = hrp.AssemblyLinearVelocity or Vector3.zero
 			if raw.Magnitude > 60 then raw = live end
@@ -1123,54 +1204,44 @@ State.SpearObj = (function()
 	end
 
 	local function estimateVelocity(char, hrp)
+		-- Abaikan motion yang berasal dari animasi interaksi atau root yang hanya jitter.
 		if isInteracting(char) or stationaryByHistory(char) then return Vector3.zero end
+
+		local hum = char:FindFirstChildOfClass("Humanoid")
 		local live = hrp.AssemblyLinearVelocity or Vector3.zero
+		local liveY = math.clamp(live.Y, -BAL.YVelClamp, BAL.YVelClamp)
 		local liveFlat = Vector3.new(live.X, 0, live.Z)
-		local smp = tracker.samples
-		if tracker.char == char and #smp >= 4 then
-			-- Tightened windows (was 0.30 / 0.14 / 0.10): reacts to a direction
-			-- change faster instead of averaging in stale movement.
-			local vLong = windowVelocity(smp, 0.22)
-			local vShort = windowVelocity(smp, 0.10)
-			local vNow = windowVelocity(smp, 0.06) or vShort
-			if vLong and vShort and vNow then
-				local flatLong = Vector3.new(vLong.X, 0, vLong.Z)
-				local flatShort = Vector3.new(vShort.X, 0, vShort.Z)
-				local flatNow = Vector3.new(vNow.X, 0, vNow.Z)
-
-				local noInput = false
-				local hum = char:FindFirstChildOfClass("Humanoid")
-				if hum then pcall(function() noInput = hum.MoveDirection.Magnitude < 0.05 end) end
-
-				local vel
-				if flatNow.Magnitude < 1.2 and liveFlat.Magnitude < 2 then
-					vel = Vector3.zero
-				elseif noInput and flatShort.Magnitude < 4 and liveFlat.Magnitude < 4 then
-					vel = Vector3.zero
-				elseif flatShort.Magnitude < flatLong.Magnitude * 0.45 and liveFlat.Magnitude < flatLong.Magnitude * 0.6 then
-					vel = (vNow + live) * 0.5
-				else
-					local cosA = 1
-					if flatLong.Magnitude > 1 and flatShort.Magnitude > 1 then
-						cosA = flatLong.Unit:Dot(flatShort.Unit)
-					end
-					if cosA < 0.5 and liveFlat.Magnitude > 1 and flatShort.Unit:Dot(liveFlat.Unit) > 0.5 then
-						vel = (vNow + live) * 0.5
-					else
-						-- Weighted further toward recent motion (was 0.3 / 0.7).
-						vel = vLong * 0.2 + vShort * 0.8
-						if liveFlat.Magnitude > 2 then vel = vel * 0.55 + live * 0.45 end
-					end
-				end
-				if vel.Magnitude > BAL.VelMagCap then vel = vel.Unit * BAL.VelMagCap end
-				return vel
-			end
+		if not hum then
+			if liveFlat.Magnitude < 2.5 then return Vector3.new(0, liveY, 0) end
+			if liveFlat.Magnitude > BAL.VelMagCap then liveFlat = liveFlat.Unit * BAL.VelMagCap end
+			return Vector3.new(liveFlat.X, liveY, liveFlat.Z)
 		end
-		local v = live
-		if v.Magnitude > BAL.VelMagCap then v = v.Unit * BAL.VelMagCap end
-		return v
-	end
 
+		-- Pola Pandu: gunakan MoveDirection * WalkSpeed ketika ada input berjalan.
+		local move = hum.MoveDirection
+		local moveFlat = Vector3.new(move.X, 0, move.Z)
+		local desired
+		if moveFlat.Magnitude >= 0.05 then
+			local walkSpeed = math.max(0, tonumber(hum.WalkSpeed) or 16)
+			desired = moveFlat.Unit * walkSpeed
+		else
+			-- MoveDirection dapat kosong untuk karakter remote; fallback ke velocity
+			-- hanya bila sampel posisi juga mengonfirmasi gerakan yang stabil.
+			if liveFlat.Magnitude < 2.5 then return Vector3.new(0, liveY, 0) end
+			local smp = tracker.samples
+			local hist = tracker.char == char and #smp >= 4 and windowVelocity(smp, 0.14) or nil
+			local histFlat = hist and Vector3.new(hist.X, 0, hist.Z) or nil
+			if histFlat and histFlat.Magnitude < 2.5 then return Vector3.new(0, liveY, 0) end
+			if histFlat and histFlat.Magnitude > 1
+				and histFlat.Unit:Dot(liveFlat.Unit) < 0.45 then
+				return Vector3.new(0, liveY, 0)
+			end
+			desired = histFlat and histFlat.Magnitude > 1 and histFlat or liveFlat
+		end
+
+		if desired.Magnitude > BAL.VelMagCap then desired = desired.Unit * BAL.VelMagCap end
+		return Vector3.new(desired.X, liveY, desired.Z)
+	end
 	local function isAuraMode(char)
 		if not char then return false end
 		if char:GetAttribute("special") == true or char:GetAttribute("Aura") == true then return true end
@@ -1182,83 +1253,73 @@ State.SpearObj = (function()
 		if not hrp then return nil end
 
 		local dist = (hrp.Position - origin).Magnitude
-		local far = math.clamp((dist - 40) / 40, 0, 1)
-		local sliderSpeed = math.clamp(tonumber(V.SpearSpeed) or 180, 60, 180)
-		-- Long-range throws used to get slowed down to ~150-170, which capped
-		-- the real max distance well under 280 studs no matter the slider.
-		-- Far throws now get a small boost instead of a cut, so reach actually
-		-- scales with the Speed slider.
-		local farSpeed = math.max(isAuraMode(LP.Character) and 215 or 195, sliderSpeed)
-		local maxSpeed = sliderSpeed + (farSpeed - sliderSpeed) * far
-		-- Lead penuh (x1.0). Pengali lama (0.5x dekat, 1.06x jauh) membuat lead tidak konsisten.
-		local leadMul = 1
-		local speed = math.clamp((chargeTime or BAL.FullChargeTime) * maxSpeed, 1, maxSpeed)
+		local far = math.clamp((dist - 40) / 160, 0, 1)
+		local sliderSpeed = math.clamp(tonumber(V.SpearSpeed) or 180, 60, 200)
+		-- Jangan kurangi speed ketika target makin jauh; Pandu mempertahankan speed.
+		local speed = math.clamp((chargeTime or BAL.FullChargeTime) * sliderSpeed, 1, sliderSpeed)
 		local gravity = getGravity()
 		local gMag = math.abs(gravity.Y)
-		local halfPing = getLatencyLead()
+		local halfPing = getPingHalf() + 0.03 + 0.13 * far
+		local leadMul = 1.4 -- nilai default Veil_LeadMultiplier pada Pandu
 
-		-- Bidik badan atas (makin jauh makin tinggi): lebih besar dari kepala, tidak gampang meleset di jarak jauh.
-		local aimTarget = hrp.Position + Vector3.new(0, 0.2 + 0.6 * math.clamp((dist - 40) / 60, 0, 1), 0)
-		-- Dekat: lead sedikit diredam; mulai 40 stud lead penuh.
-		local nearMul = 0.95 + 0.05 * math.clamp((dist - 8) / 32, 0, 1)
-		local vel = clampVelY(estimateVelocity(targetChar, hrp)) * leadMul * nearMul
+		local aimTarget = hrp.Position + Vector3.new(0, 0.2, 0)
+		if dist > 100 then
+			local head = targetChar:FindFirstChild("Head")
+			if head and head:IsA("BasePart") then aimTarget = head.Position end
+		end
+
+		local vel = clampVelY(estimateVelocity(targetChar, hrp))
 		if V.Predict == false then vel = Vector3.zero end
 
-		-- Batas lead mengikuti waktu terbang asli (dulu dipotong 0.40 detik, lemparan jauh kurang lead).
-		local maxLeadTime = dist <= 35 and 0.30 or 1.10
-
-		local function solveTime(spd)
-			local delta0 = (aimTarget + vel * halfPing) - origin
-			local tt = math.max(0.04, delta0.Magnitude / spd)
-			local ok = true
-			for _ = 1, 8 do
-				local leadTime = math.clamp(tt + halfPing, 0.04, maxLeadTime)
-			local leadPos = aimTarget + vel * leadTime
-				local d = leadPos - origin
-				local dxz = Vector3.new(d.X, 0, d.Z).Magnitude
-				local dy = d.Y
-				local qa = 0.25 * gMag * gMag
-				local qb = dy * gMag - spd * spd
-				local qc = dxz * dxz + dy * dy
-				local disc = qb * qb - 4 * qa * qc
-				if gMag < 0.001 then
-					tt = math.max(0.04, d.Magnitude / spd)
-				elseif disc >= 0 then
-					local t2 = (-qb - math.sqrt(disc)) / (2 * qa)
-					if t2 > 0 then tt = math.sqrt(t2)
-					else tt = math.max(0.04, d.Magnitude / spd) end
-				else
-					ok = false
-					tt = math.max(0.04, d.Magnitude / spd)
-					break
-				end
-			end
-			return tt, ok
+		-- Batas lead mengikuti metode Pandu: clamp(jarak * 0.6, 3, 45) stud.
+		local maxLead = math.clamp(dist * 0.6, 3, 45)
+		local function getLeadPosition(flightTime)
+			local offset = vel * ((flightTime + halfPing) * leadMul)
+			if offset.Magnitude > maxLead then offset = offset.Unit * maxLead end
+			return aimTarget + offset
 		end
 
-		local t, reachable = solveTime(speed)
-		if not reachable and gMag > 0.001 then
-			local capSpeed = math.clamp(tonumber(V.SpearSpeed) or 180, 60, 180)
-			local boosted = math.clamp((chargeTime or BAL.FullChargeTime) * capSpeed, 1, capSpeed)
-			if boosted > speed then
-				local t2, ok2 = solveTime(boosted)
-				speed, t, reachable = boosted, t2, ok2
+		-- Ballistik lintasan rendah ala Pandu (fn36). Gravity tetap mengikuti
+		-- parameter fisik, sedangkan sudut dan flight-time dihitung ulang dari jarak.
+		local function solveLowArc(horizontalDistance, verticalDelta)
+			local range = math.max(horizontalDistance, 0.1)
+			if gMag < 0.001 then
+				return math.atan2(verticalDelta, range), math.max(0.04, range / speed)
 			end
+			local speed2 = speed * speed
+			local disc = speed2 * speed2 - gMag * (gMag * range * range + 2 * verticalDelta * speed2)
+			-- Pandu membatasi discriminant negatif ke nol agar tetap menghasilkan
+			-- sudut low-arc pada jarak di luar jangkauan teoritis.
+			local root = math.sqrt(math.max(disc, 0))
+			local tanAngle = (speed2 - root) / (gMag * range)
+			local angle = math.atan(tanAngle)
+			local cosine = math.max(math.cos(angle), 0.05)
+			local flightTime = math.max(0.04, range / (speed * cosine))
+			return angle, flightTime
 		end
 
-		local finalLead = aimTarget + vel * math.clamp(t + halfPing, 0.04, maxLeadTime)
-		local delta = finalLead - origin
-
-		if not reachable and gMag > 0.001 then
+		local firstDelta = aimTarget - origin
+		local initialFlat = Vector3.new(firstDelta.X, 0, firstDelta.Z).Magnitude
+		local _, flightTime = solveLowArc(initialFlat, firstDelta.Y)
+		local finalLead, finalDir
+		for _ = 1, 8 do
+			finalLead = getLeadPosition(flightTime)
+			local delta = finalLead - origin
 			local flat = Vector3.new(delta.X, 0, delta.Z)
-			local horiz = flat.Magnitude > 1e-3 and flat.Unit or Vector3.new(0, 0, -1)
-			local root = speed * speed - 2 * gMag * delta.Y
-			local ang = root > 0 and math.atan(speed / math.sqrt(root)) or math.rad(45)
-			local dirv = (horiz * math.cos(ang) + Vector3.new(0, math.sin(ang), 0)).Unit
-			return dirv, dirv * speed, speed, finalLead
+			local horizontal = flat.Magnitude
+			local angle, nextTime = solveLowArc(horizontal, delta.Y)
+			local heading = horizontal > 0.001 and flat.Unit or Vector3.new(0, 0, -1)
+			finalDir = (heading * math.cos(angle) + Vector3.new(0, math.sin(angle), 0)).Unit
+			flightTime = nextTime
 		end
-		local launchVel = (delta - 0.5 * gravity * t * t) / t
-		return launchVel.Unit, launchVel, speed, finalLead
+
+		finalLead = getLeadPosition(flightTime)
+		local delta = finalLead - origin
+		local flat = Vector3.new(delta.X, 0, delta.Z)
+		local angle = solveLowArc(flat.Magnitude, delta.Y)
+		local heading = flat.Magnitude > 0.001 and flat.Unit or Vector3.new(0, 0, -1)
+		finalDir = (heading * math.cos(angle) + Vector3.new(0, math.sin(angle), 0)).Unit
+		return finalDir, finalDir * speed, speed, finalLead
 	end
 
 	local function isSpearActive(char)
@@ -1498,10 +1559,10 @@ State.SpearObj = (function()
 					trailOrigin = origin
 					trailDir = payload.Direction
 					trailSpeed = typeof(payload.Velocity) == "Vector3" and payload.Velocity.Magnitude
-						or math.clamp(charge * (tonumber(V.SpearSpeed) or 180), 1, 180)
+						or math.clamp(charge * (tonumber(V.SpearSpeed) or 180), 1, 200)
 				elseif typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
 					trailOrigin, trailDir = args[1], args[2]
-					trailSpeed = math.clamp(charge * (tonumber(V.SpearSpeed) or 180), 1, 180)
+					trailSpeed = math.clamp(charge * (tonumber(V.SpearSpeed) or 180), 1, 200)
 				end
 			end
 		end)
@@ -1570,6 +1631,7 @@ State.SpearObj = (function()
 
 	local function hideVisuals()
 		pcall(function() line.Visible = false end)
+		pcall(State.ClearMark, "spear")
 		pcall(function() ring.Enabled = false; ring.Adornee = nil; ring.Parent = nil end)
 	end
 
@@ -1614,6 +1676,7 @@ State.SpearObj = (function()
 		if V.TargetChar then
 			local hrp = t.hrp
 			trackTarget(V.TargetChar, hrp)
+			pcall(State.SetMark, "spear", V.TargetChar, TARGET_COLOR)
 
 			if ring.Adornee ~= hrp or ring.Parent ~= hrp then
 				ring.Parent = hrp
@@ -1646,6 +1709,7 @@ State.SpearObj = (function()
 		V.Dead = true
 		if V.RenderConn then pcall(function() V.RenderConn:Disconnect() end); V.RenderConn = nil end
 		paintName(lastNamed, false)
+		pcall(State.ClearMark, "spear")
 		pcall(function() ring:Destroy() end)
 		pcall(function() sg:Destroy() end)
 		V.TargetChar = nil
@@ -1697,6 +1761,33 @@ State.SpearObj = (function()
 	return V
 end)()
 
+-- Ambil titik asal laser dari pistol Twist of Fate, mengikuti pola getGunObject
+-- pada script referensi: Right Arm > gun / EmperorGun > BasePart.Position.
+local function getTOFGunPart(ch)
+	local tool = ch and ch:FindFirstChild("Twist of Fate", true)
+	if not tool then return nil end
+
+	local rightArm = tool:FindFirstChild("Right Arm", true)
+	if rightArm then
+		for _, name in ipairs({ "gun", "EmperorGun" }) do
+			local gun = rightArm:FindFirstChild(name)
+			if gun then
+				if gun:IsA("BasePart") then return gun end
+				local part = gun:FindFirstChildWhichIsA("BasePart", true)
+				if part then return part end
+			end
+		end
+	end
+
+	if tool:IsA("BasePart") then return tool end
+	return tool:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getTOFLaserOrigin(ch)
+	local gunPart = getTOFGunPart(ch)
+	return gunPart and gunPart.Position or nil
+end
+
 State.TOF = {
 	Enabled = false,
 	ShowLaser = false,
@@ -1707,10 +1798,100 @@ State.TOF = {
 	Vis = true,
 }
 
+do
+	local marks = {}
+	local function setNameColor(char, color)
+		pcall(function()
+			local bb = char and char:FindFirstChild("PE_Text")
+			local box = bb and bb:FindFirstChild("Box")
+			local row = box and box:FindFirstChild("NameRow")
+			local lbl = row and row:FindFirstChild("NameText")
+			if lbl and lbl:IsA("TextLabel") then lbl.TextColor3 = color end
+		end)
+	end
+	local function clear(key)
+		local m = marks[key]
+		if not m then return end
+		marks[key] = nil
+		if m.highlight then pcall(function() m.highlight:Destroy() end) end
+		if m.char then
+			local stillMarked, activeColor = false, nil
+			for _, other in pairs(marks) do
+				if other.char == m.char then
+					stillMarked = true
+					activeColor = other.color
+					break
+				end
+			end
+			if stillMarked then
+				setNameColor(m.char, activeColor or Color3.fromRGB(255, 40, 40))
+			else
+				setNameColor(m.char, Color3.fromRGB(240, 240, 248))
+			end
+		end
+	end
+	State.ClearMark = clear
+	State.SetMark = function(key, char, color)
+		if not char or not char.Parent then return clear(key) end
+		local m = marks[key]
+		if m and m.char == char and m.highlight and m.highlight.Parent == char then
+			m.highlight.FillColor = color
+			m.highlight.OutlineColor = color
+			m.color = color
+			setNameColor(char, color)
+			return
+		end
+		clear(key)
+		local hl = Instance.new("Highlight")
+		hl.Name = "KINON_TargetHighlight_" .. tostring(key)
+		hl.Adornee = char
+		hl.FillColor = color
+		hl.OutlineColor = color
+		hl.FillTransparency = 0.5
+		hl.OutlineTransparency = 1
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = char
+		setNameColor(char, color)
+		marks[key] = { char = char, highlight = hl, color = color }
+	end
+	State.DestroyMarks = function()
+		for k in pairs(marks) do clear(k) end
+	end
+end
+
+State.AimHold = { held = false, ok = false, tried = false }
+do
+	local AH = State.AimHold
+	local old
+	AH.Install = function()
+		if AH.tried then return end
+		AH.tried = true
+		if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then return end
+		local wrapf = newcclosure or function(f) return f end
+		local ok = pcall(function()
+			old = hookmetamethod(game, "__namecall", wrapf(function(self, ...)
+				local method = getnamecallmethod()
+				if setnamecallmethod then setnamecallmethod(method) end
+				if not unloaded and method == "FireServer" and typeof(self) == "Instance" and self.Name == "AimHold" and self.ClassName == "RemoteEvent" then
+					local v = select(2, ...)
+					if type(v) == "boolean" then AH.held = v end
+				end
+				if setnamecallmethod then setnamecallmethod(method) end
+				return old(self, ...)
+			end))
+		end)
+		AH.ok = ok and old ~= nil
+	end
+end
+
 State.TOFSilent = {
 	Enabled = false,
 	FOV = 120,
 	Predict = false,
+	ZigZag = false,
+	LeadScale = 100,
+	ShowCircle = true,
+	ShowLaser = true,
 }
 
 State.TOFObj = (function()
@@ -1718,6 +1899,7 @@ State.TOFObj = (function()
 	local obj = {}
 	local conns, btnConns = {}, {}
 	local holding, token, curBtn, laserPart = false, 0, nil, nil
+	local renderBindName = "KINON_TOFAimlockLaser_" .. tostring(LP.UserId)
 	local rp = RaycastParams.new()
 	rp.FilterType = Enum.RaycastFilterType.Exclude
 	local laserRay = RaycastParams.new()
@@ -1754,8 +1936,8 @@ State.TOFObj = (function()
 		return true
 	end
 
-	local function updateLaser(origin, target)
-		if not (T.ShowLaser and origin and target) or laserBlocked(origin, target) then return hideLaser() end
+	local function updateLaser(origin, to)
+		if not (T.ShowLaser and origin and to) then return hideLaser() end
 		if not (laserPart and laserPart.Parent) then
 			local p = Instance.new("Part")
 			p.Name = "KinonLaser"
@@ -1765,12 +1947,12 @@ State.TOFObj = (function()
 			p.Parent = workspace
 			laserPart = p
 		end
-		local to = target.Position
 		local dist = (to - origin).Magnitude
 		if dist < 0.5 then return hideLaser() end
-		laserPart.Size = Vector3.new(0.12, 0.12, dist)
-		laserPart.CFrame = CFrame.lookAt((origin + to) / 2, to)
-		laserPart.Transparency = 0.25
+		local thick = math.clamp(dist * 0.0015, 0.12, 0.3)
+		laserPart.Size = Vector3.new(thick, thick, dist)
+		laserPart.CFrame = CFrame.new((origin + to) / 2, to)
+		laserPart.Transparency = 0
 	end
 
 	local function findButton()
@@ -1808,20 +1990,40 @@ State.TOFObj = (function()
 
 	local function step()
 		if unloaded or not T.Enabled then return end
-		if not holding then return hideLaser() end
-		local cam = workspace.CurrentCamera
-		local target = closest()
-		if not cam or not target then return hideLaser() end
-		local pos = target.Position + target.AssemblyLinearVelocity * ((tonumber(T.Predict) or 0) / 100)
-		local k = math.clamp((tonumber(T.Smooth) or 50) / 100, 0.05, 1)
-		cam.CFrame = cam.CFrame:Lerp(CFrame.new(cam.CFrame.Position, pos), k)
+		local AH = State.AimHold
 		local char = LP.Character
-		local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
-		pcall(updateLaser, head and head.Position, target)
+		if AH.held and not (char and char:FindFirstChild("Twist of Fate")) then AH.held = false end
+		local aiming = holding or (AH.ok and AH.held)
+		local laserOn = T.ShowLaser and ((AH.ok and AH.held) or (not AH.ok and holding))
+		if not aiming and not laserOn then return hideLaser() end
+		local cam = workspace.CurrentCamera
+		if not cam then return hideLaser() end
+		local target = closest()
+		local aimPos
+		if target then
+			aimPos = target.Position + target.AssemblyLinearVelocity * ((tonumber(T.Predict) or 0) / 100)
+			if aiming then
+				local k = math.clamp((tonumber(T.Smooth) or 50) / 100, 0.05, 1)
+				cam.CFrame = cam.CFrame:Lerp(CFrame.new(cam.CFrame.Position, aimPos), k)
+			end
+		end
+		if not laserOn then return hideLaser() end
+		local origin = getTOFLaserOrigin(char)
+		if not origin then return hideLaser() end
+		local dir
+		if aimPos and (aimPos - origin).Magnitude > 0.5 then
+			dir = (aimPos - origin).Unit
+		else
+			dir = cam.CFrame.LookVector
+		end
+		laserRay.FilterDescendantsInstances = { char }
+		local hit = workspace:Raycast(origin, dir * 500, laserRay)
+		pcall(updateLaser, origin, hit and hit.Position or (origin + dir * 500))
 	end
 
 	local function teardown()
 		token = token + 1
+		pcall(function() RunService:UnbindFromRenderStep(renderBindName) end)
 		holding = false
 		for _, c in ipairs(conns) do c:Disconnect() end
 		for _, c in ipairs(btnConns) do c:Disconnect() end
@@ -1833,8 +2035,11 @@ State.TOFObj = (function()
 		T.Enabled = v == true
 		teardown()
 		if not T.Enabled then return end
+		State.AimHold.Install()
 		local my = token
-		conns[#conns + 1] = RunService.RenderStepped:Connect(function() pcall(step) end)
+		RunService:BindToRenderStep(renderBindName, Enum.RenderPriority.Last.Value, function()
+			if token == my then pcall(step) end
+		end)
 		conns[#conns + 1] = UserInputService.InputBegan:Connect(function(input, gp)
 			if gp then return end
 			if input.UserInputType == Enum.UserInputType.MouseButton2 then holding = true end
@@ -1880,112 +2085,256 @@ end
 State.SilentObj = (function()
 	local T = State.TOFSilent
 	local obj = {}
-	local BULLET_SPEED = 800
-	local PREDICT_ITERATIONS = 3
-	local PRIORITY = { "UpperTorso", "Torso" }
 	local effects, original
 	local installing = false
-	local killerChar, skinModel
-	local circleGui, circleFrame, circleStroke
-	local lastScan, lastStatus = 0, 0
-	local lastText
 
-	local function findKillerChar()
+	local function killerChar()
 		for _, p in ipairs(Players:GetPlayers()) do
-			if p ~= LP and p.Character and p.Character:FindFirstChild("Lookscriptkiller", true) then
-				return p.Character
+			if p ~= LP and p.Character then
+				local team = p.Team and string.lower(p.Team.Name) or ""
+				if string.find(team, "killer", 1, true) or p.Character:FindFirstChild("Lookscriptkiller", true) then
+					return p.Character
+				end
 			end
 		end
 		return nil
 	end
 
-	local function getTargetPart(ch)
-		if not ch then return nil end
-		for _, n in ipairs(PRIORITY) do
-			local part = ch:FindFirstChild(n)
-			if part then return part end
-		end
-		return nil
+	local function targetPart(ch)
+		return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
 	end
 
-	local function detectSkin()
-		local ch = LP.Character
-		local tool = ch and ch:FindFirstChild("Twist of Fate")
-		local arm = tool and tool:FindFirstChild("Right Arm")
-		if not arm then return nil end
-		for _, c in ipairs(arm:GetChildren()) do
-			if c:IsA("Model") then return c end
-		end
-		return nil
+	local function hasTOF(ch)
+		if not ch then return false end
+		if ch:FindFirstChild("Twist of Fate") then return true end
+		local eq = string.lower(tostring(LP:GetAttribute("EquippedItem") or ""))
+		return eq:find("twist", 1, true) ~= nil or eq:find("fate", 1, true) ~= nil
 	end
 
-	local function getMuzzle(ch)
-		if not ch then return nil end
-		if skinModel and skinModel.Parent then
-			local smoke = skinModel:FindFirstChild("SmokePart", true)
-			if smoke and smoke:IsA("BasePart") then return smoke.Position end
-			local barrel = skinModel:FindFirstChild("barrel", true)
-			if barrel and barrel:IsA("BasePart") then return barrel.Position end
-			if skinModel.PrimaryPart then return skinModel.PrimaryPart.Position end
-		end
-		local hrp = ch:FindFirstChild("HumanoidRootPart")
-		if hrp then return (hrp.CFrame * CFrame.new(0.7, 1.373, -2.5)).Position end
-		return nil
+	local function muzzle(ch)
+		return getTOFLaserOrigin(ch)
 	end
 
-	local function checkWall(origin, targetPos)
-		local direction = targetPos - origin
-		if direction.Magnitude < 0.1 then return false end
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		params.IgnoreWater = true
-		local exclude = {}
-		for _, p in ipairs(Players:GetPlayers()) do
-			if p.Character then table.insert(exclude, p.Character) end
+	local PROJ_SPEED = 800
+	local LEAD_MAX_TIME = 0.5
+	local LEAD_MAX_DIST = 16
+	local NEAR_START = 1
+	local NEAR_FULL = 5
+	local INTERP_DELAY = 0.05
+	local HISTORY_WINDOW = 0.12
+	local HISTORY_KEEP = 0.7
+	local VEL_CAP = 60
+	local Y_VEL_CLAMP = 14
+	local TELEPORT_STEP = 12
+	local history = setmetatable({}, { __mode = "k" })
+
+	local function record(part, now)
+		local list = history[part]
+		if not list then
+			list = {}
+			history[part] = list
 		end
-		if skinModel then table.insert(exclude, skinModel) end
-		params.FilterDescendantsInstances = exclude
-		return workspace:Raycast(origin, direction, params) ~= nil
+		local pos = part.Position
+		local last = list[#list]
+		if last and (pos - last.p).Magnitude > TELEPORT_STEP then
+			table.clear(list)
+		end
+		list[#list + 1] = { t = now, p = pos }
+		while #list > 2 and now - list[1].t > HISTORY_KEEP do
+			table.remove(list, 1)
+		end
 	end
 
-	local function isInFOV(targetPos)
+	local function limitVel(v)
+		v = Vector3.new(v.X, math.clamp(v.Y, -Y_VEL_CLAMP, Y_VEL_CLAMP), v.Z)
+		if v.Magnitude > VEL_CAP then v = v.Unit * VEL_CAP end
+		return v
+	end
+
+	local function flat(v)
+		return Vector3.new(v.X, 0, v.Z)
+	end
+
+	local function latencyLead()
+		local ok, ping = pcall(function() return LP:GetNetworkPing() end)
+		local rtt = (ok and type(ping) == "number" and ping > 0) and math.clamp(ping, 0.02, 0.4) or 0.08
+		return (rtt + INTERP_DELAY) * 0.6
+	end
+
+	track(RunService.Heartbeat:Connect(function()
+		if unloaded or not (T.Enabled and (T.Predict or T.ZigZag)) then return end
+		local kc = killerChar()
+		local part = kc and targetPart(kc)
+		if part then record(part, os.clock()) end
+	end))
+
+	local function observedVel(part)
+		local list = history[part]
+		if not list or #list < 2 then return nil end
+		local newest = list[#list]
+		if os.clock() - newest.t > 0.15 then return nil end
+		local ref = list[1]
+		for i = #list - 1, 1, -1 do
+			if newest.t - list[i].t >= 0.05 then
+				ref = list[i]
+				break
+			end
+		end
+		local dt = newest.t - ref.t
+		if dt < 0.03 then return nil end
+		return (newest.p - ref.p) / dt
+	end
+
+	local function getVelocity(part, hrp, hum)
+		local base = hrp.AssemblyLinearVelocity
+		local obs = observedVel(part)
+		if obs and obs.Magnitude > 3 and obs.Magnitude < 120 then
+			local bf = flat(base)
+			if bf.Magnitude < 1.5 or flat(obs):Dot(bf) < 0 then base = obs end
+		end
+		if hum then
+			local md = hum.MoveDirection
+			if md.Magnitude > 0.05 then
+				local intent = md * hum.WalkSpeed
+				local bf = flat(base)
+				if bf.Magnitude > 0.5 and flat(intent):Dot(bf) < 0 then base = intent end
+			end
+		end
+		return limitVel(base)
+	end
+
+	local function zigzagPoint(part, from)
+		local list = history[part]
+		if not list or #list < 6 then return nil end
+		local now = os.clock()
+		local cut = now - 0.5
+		local flips, prev, n = 0, nil, 0
+		local sx, sz = 0, 0
+		local first
+		for i = 2, #list do
+			local a, b = list[i - 1], list[i]
+			if b.t >= cut then
+				first = first or a
+				local dt = b.t - a.t
+				if dt > 0.03 then
+					local v = flat((b.p - a.p) / dt)
+					if v.Magnitude > 4 then
+						if prev and prev:Dot(v) < 0 then flips = flips + 1 end
+						prev = v
+					end
+				end
+				sx, sz, n = sx + b.p.X, sz + b.p.Z, n + 1
+			end
+		end
+		if flips < 2 or n < 4 or not first then return nil end
+		local newest = list[#list]
+		local span = newest.t - first.t
+		local drift = Vector3.zero
+		if span > 0.15 then drift = flat((newest.p - first.p) / span) end
+		if drift.Magnitude > 30 then drift = drift.Unit * 30 end
+		local center = Vector3.new(sx / n, newest.p.Y, sz / n)
+		local t = (center - from).Magnitude / PROJ_SPEED + latencyLead()
+		return center + drift * t
+	end
+
+	local function aimPoint(part, from)
+		local pos = part.Position
+		if not (T.Predict or T.ZigZag) then return pos end
+		if T.ZigZag then
+			local zp = zigzagPoint(part, from)
+			if zp then return zp end
+		end
+		if not T.Predict then return pos end
+		local ch = part.Parent
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return pos end
+		local hum = ch:FindFirstChildOfClass("Humanoid")
+		local vel = getVelocity(part, hrp, hum)
+		if vel.Magnitude < 1 then return pos end
+		local lat = latencyLead()
+		local t = (pos - from).Magnitude / PROJ_SPEED + lat
+		local predicted = pos
+		for _ = 1, 3 do
+			predicted = pos + vel * t
+			t = (predicted - from).Magnitude / PROJ_SPEED + lat
+		end
+		local scale = math.clamp((tonumber(T.LeadScale) or 100) / 100, 0.3, 3)
+		local offset = (predicted - pos) * scale
+		if offset.Magnitude > 22 then offset = offset.Unit * 22 end
+		return pos + offset
+	end
+
+	local function inFov(pos)
 		local cam = workspace.CurrentCamera
 		if not cam then return false end
-		local toTarget = targetPos - cam.CFrame.Position
-		if toTarget.Magnitude < 0.1 then return true end
-		local dot = math.clamp(cam.CFrame.LookVector:Dot(toTarget.Unit), -1, 1)
-		return math.deg(math.acos(dot)) <= (T.FOV / 2)
+		local to = pos - cam.CFrame.Position
+		if to.Magnitude < 0.1 then return true end
+		local dot = math.clamp(cam.CFrame.LookVector:Dot(to.Unit), -1, 1)
+		return math.deg(math.acos(dot)) <= (tonumber(T.FOV) or 120) / 2
 	end
 
-	local function predictPosition(ch, muzzlePos)
-		local part = getTargetPart(ch)
+	local function compute(character, ignoreFov)
+		local kc = killerChar()
+		local part = kc and targetPart(kc)
 		if not part then return nil end
-		local hrp = ch:FindFirstChild("HumanoidRootPart")
-		if not hrp then return part.Position end
-		local vel = hrp.AssemblyLinearVelocity
-		if vel.Magnitude < 1 then return part.Position end
-		local current = part.Position
-		local timeToHit = (current - muzzlePos).Magnitude / BULLET_SPEED
-		local predicted = current
-		for _ = 1, PREDICT_ITERATIONS do
-			local future = current + vel * timeToHit
-			timeToHit = (future - muzzlePos).Magnitude / BULLET_SPEED
-			predicted = future
+		local from = muzzle(character)
+		if not from then return nil end
+		local pos = aimPoint(part, from)
+		if not ignoreFov and not inFov(pos) then return nil end
+		local d = pos - from
+		if d.Magnitude < 0.01 then return nil end
+		return d.Unit
+	end
+
+	local circleGui, circleFrame, laserPart
+	local activeTool, toolConns = nil, {}
+	local isFiring, releaseUntil = false, 0
+	local lastAimDir, lastAimAt = nil, 0
+
+	local function clearToolConnections()
+		for _, c in ipairs(toolConns) do pcall(function() c:Disconnect() end) end
+		table.clear(toolConns)
+		activeTool = nil
+		isFiring, releaseUntil = false, 0
+	end
+
+	local mouseHeld = false
+	toolConns[#toolConns + 1] = track(UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			mouseHeld = true
 		end
-		return predicted
-	end
+	end))
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			mouseHeld = false
+			releaseUntil = tick() + 0.12
+		end
+	end))
 
-	local function getEffectiveTargetPos(muzzlePos)
-		local part = getTargetPart(killerChar)
-		if not part then return nil end
-		if T.Predict then return predictPosition(killerChar, muzzlePos) end
-		return part.Position
-	end
+	local BULLET_LASER_MAX = 500
 
-	local function setStatus(text, color)
-		if text == lastText then return end
-		lastText = text
-		if State.TOFSilentStatus then pcall(State.TOFSilentStatus, text, color) end
+	local function bindActiveTool(ch)
+		local tool = ch and ch:FindFirstChild("Twist of Fate")
+		if tool == activeTool then return end
+		clearToolConnections()
+		mouseHeld = false
+		if not (tool and tool:IsA("Tool")) then return end
+		activeTool = tool
+		toolConns[#toolConns + 1] = tool.Activated:Connect(function()
+			isFiring = true
+			releaseUntil = 0
+		end)
+		toolConns[#toolConns + 1] = tool.Deactivated:Connect(function()
+			State.AimHold.held = false
+			isFiring = false
+			releaseUntil = tick() + 0.12
+		end)
+		toolConns[#toolConns + 1] = tool.Unequipped:Connect(function()
+			State.AimHold.held = false
+			isFiring = false
+			releaseUntil = 0
+		end)
 	end
 
 	local function ensureCircle()
@@ -2010,72 +2359,95 @@ State.SilentObj = (function()
 		corner.Parent = f
 		local stroke = Instance.new("UIStroke")
 		stroke.Color = Color3.fromRGB(255, 255, 255)
-		stroke.Thickness = 2
-		stroke.Transparency = 0.15
+		stroke.Thickness = 1.5
+		stroke.Transparency = 0.2
 		stroke.Parent = f
-		if not pcall(function() sg.Parent = parent end) then return false end
-		circleGui, circleFrame, circleStroke = sg, f, stroke
+		local ok = pcall(function() sg.Parent = parent end)
+		if not ok then return false end
+		circleGui, circleFrame = sg, f
 		return true
 	end
 
-	local WHITE = Color3.fromRGB(255, 255, 255)
-	local GREEN = Color3.fromRGB(50, 255, 50)
-	local RED = Color3.fromRGB(255, 50, 50)
+	local function circleRadius(cam)
+		local half = math.rad(math.clamp((tonumber(T.FOV) or 120) / 2, 1, 85))
+		local halfV = math.rad(cam.FieldOfView) / 2
+		local r = (cam.ViewportSize.Y / 2) * math.tan(half) / math.tan(halfV)
+		local visibleCap = math.min(cam.ViewportSize.X, cam.ViewportSize.Y) * 0.48
+		return math.clamp(r, 12, visibleCap)
+	end
 
-	track(RunService.RenderStepped:Connect(function()
-		if unloaded or not T.Enabled then
-			if circleGui then circleGui.Enabled = false end
-			return
-		end
-		if not ensureCircle() then return end
-		circleGui.Enabled = true
-		local radius = T.FOV * 2
-		circleFrame.Size = UDim2.fromOffset(radius, radius)
+	local function hideLaser()
+		if laserPart then laserPart.Transparency = 1 end
+	end
 
-		if not skinModel or not skinModel.Parent then skinModel = detectSkin() end
-		local now = tick()
-		if now - lastScan > 0.25 or not (killerChar and killerChar.Parent) then
-			lastScan = now
-			killerChar = findKillerChar()
+	local function updateLaser(from, to)
+		if not (laserPart and laserPart.Parent) then
+			local p = Instance.new("Part")
+			p.Name = "KINON_TOFSilentLaser"
+			p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
+			p.Material = Enum.Material.Neon
+			p.Color = Color3.fromRGB(255, 60, 60)
+			p.Transparency = 1
+			p.Parent = workspace
+			laserPart = p
 		end
+		local dist = (to - from).Magnitude
+		if dist < 0.5 then return hideLaser() end
+		local thick = math.clamp(dist * 0.0015, 0.12, 0.3)
+		laserPart.Size = Vector3.new(thick, thick, dist)
+		laserPart.CFrame = CFrame.new((from + to) / 2, to)
+		laserPart.Transparency = 0
+	end
 
-		if not killerChar then
-			circleStroke.Color = WHITE
-			return setStatus("Status: Scanning...", Color3.fromRGB(255, 200, 50))
-		end
-		if not getTargetPart(killerChar) then
-			circleStroke.Color = WHITE
-			return setStatus("Status: No body part", Color3.fromRGB(255, 100, 100))
-		end
-		local muzzlePos = getMuzzle(LP.Character)
-		if not muzzlePos then
-			circleStroke.Color = WHITE
-			return setStatus("Status: No muzzle", Color3.fromRGB(160, 160, 160))
-		end
-		local targetPos = getEffectiveTargetPos(muzzlePos)
-		if not targetPos then
-			circleStroke.Color = WHITE
-			return
-		end
-		if not isInFOV(targetPos) then
-			circleStroke.Color = WHITE
-			return setStatus("Status: Out of FOV", Color3.fromRGB(255, 200, 50))
-		end
-		if now - lastStatus < 0.1 then return end
-		lastStatus = now
-		local blocked = checkWall(muzzlePos, targetPos)
-		circleStroke.Color = blocked and RED or GREEN
+	local aimRay = RaycastParams.new()
+	aimRay.FilterType = Enum.RaycastFilterType.Exclude
+	aimRay.RespectCanCollide = true
+
+	local function drawAimLaser(ch, from, dir)
+		aimRay.FilterDescendantsInstances = { ch }
+		local res = workspace:Raycast(from, dir * BULLET_LASER_MAX, aimRay)
+		updateLaser(from, res and res.Position or (from + dir * BULLET_LASER_MAX))
+	end
+
+	local renderBindName = "KINON_TOFSilentLaser_" .. tostring(LP.UserId)
+	pcall(function() RunService:UnbindFromRenderStep(renderBindName) end)
+	RunService:BindToRenderStep(renderBindName, Enum.RenderPriority.Last.Value, function()
+		local active = T.Enabled and not unloaded
 		local cam = workspace.CurrentCamera
-		local dist = cam and math.floor((targetPos - cam.CFrame.Position).Magnitude) or 0
-		setStatus(string.format("LOCKED | %dm | %s%s", dist, blocked and "BLOCKED" or "CLEAR", T.Predict and " | PREDICT" or ""),
-			blocked and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100))
-	end))
+		if active and T.ShowCircle and cam and ensureCircle() then
+			circleGui.Enabled = true
+			local r = circleRadius(cam)
+			circleFrame.Size = UDim2.fromOffset(r * 2, r * 2)
+		elseif circleGui then
+			circleGui.Enabled = false
+		end
+
+		if not active or not T.ShowLaser then return hideLaser() end
+		local ch = LP.Character
+		bindActiveTool(ch)
+		if not hasTOF(ch) then State.AimHold.held = false; return hideLaser() end
+		if State.AimHold.ok and not State.AimHold.held then return hideLaser() end
+		local from = muzzle(ch)
+		if not from then return hideLaser() end
+		local good, dir = pcall(compute, ch, true)
+		if not (good and typeof(dir) == "Vector3") then
+			dir = nil
+			if cam then
+				aimRay.FilterDescendantsInstances = { ch }
+				local hit = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * BULLET_LASER_MAX, aimRay)
+				local target = hit and hit.Position or (cam.CFrame.Position + cam.CFrame.LookVector * BULLET_LASER_MAX)
+				local d = target - from
+				dir = d.Magnitude > 0.5 and d.Unit or cam.CFrame.LookVector
+			end
+		end
+		if not dir then return hideLaser() end
+		pcall(drawAimLaser, ch, from, dir)
+	end)
 
 	local function restore()
 		if effects and original then
 			pcall(function() effects.aimDirection = original end)
 		end
-		effects, original = nil, nil
 	end
 
 	local function install()
@@ -2090,14 +2462,14 @@ State.SilentObj = (function()
 				if type(orig) ~= "function" then error("no aimDirection") end
 				e.aimDirection = function(character, camCF)
 					if unloaded or not T.Enabled then return orig(character, camCF) end
-					local muzzlePos = getMuzzle(character)
-					if not muzzlePos then return orig(character, camCF) end
-					local targetPos = getEffectiveTargetPos(muzzlePos)
-					if not targetPos then return orig(character, camCF) end
-					if not isInFOV(targetPos) then return orig(character, camCF) end
-					local direction = targetPos - muzzlePos
-					if direction.Magnitude < 0.01 then return orig(character, camCF) end
-					return direction.Unit
+					local good, dir = pcall(compute, character)
+					if good and dir then
+						lastAimDir, lastAimAt = dir, tick()
+						return dir
+					end
+					local res = orig(character, camCF)
+					if typeof(res) == "Vector3" then lastAimDir, lastAimAt = res, tick() end
+					return res
 				end
 				effects, original = e, orig
 			end)
@@ -2107,20 +2479,17 @@ State.SilentObj = (function()
 	end
 
 	function obj:Refresh()
-		if T.Enabled then
-			skinModel = detectSkin()
-			install()
-		else
-			if circleGui then circleGui.Enabled = false end
-			lastText = nil
-			if State.TOFSilentStatus then pcall(State.TOFSilentStatus, "Status: Disabled", Color3.fromRGB(160, 160, 160)) end
-		end
+		if T.Enabled then State.AimHold.Install(); install() end
 	end
 
 	function obj:Destroy()
 		T.Enabled = false
+		pcall(function() RunService:UnbindFromRenderStep(renderBindName) end)
+		clearToolConnections()
+		mouseHeld = false
 		restore()
 		if circleGui then pcall(function() circleGui:Destroy() end) end
+		if laserPart then pcall(function() laserPart:Destroy() end) end
 	end
 
 	return obj
@@ -2450,30 +2819,16 @@ State.SilentChain = (function()
 		end
 	end))
 
-	local highlight = Instance.new("Highlight")
-	highlight.Name = "KINON_ChainHighlight"
-	highlight.FillColor = Color3.fromRGB(255, 40, 40)
-	highlight.OutlineColor = Color3.fromRGB(255, 40, 40)
-	highlight.FillTransparency = 0.6
-	highlight.OutlineTransparency = 0
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	highlight.Adornee = nil
-
 	track(RunService.RenderStepped:Connect(function()
 		if S.Enabled and S.Highlight and not unloaded then
 			local t = getTarget()
 			local char = t and t.Parent
 			if char then
-				if highlight.Parent ~= char then highlight.Parent = char end
-				if highlight.Adornee ~= char then highlight.Adornee = char end
-				highlight.Enabled = true
+				pcall(State.SetMark, "chain", char, Color3.fromRGB(255, 40, 40))
 				return
 			end
 		end
-		if highlight.Parent ~= nil then
-			highlight.Adornee = nil
-			highlight.Parent = nil
-		end
+		pcall(State.ClearMark, "chain")
 	end))
 
 	local function redirect(args)
@@ -2560,8 +2915,7 @@ State.SilentChain = (function()
 
 	function S.Destroy()
 		S.Enabled = false
-		highlight.Adornee = nil
-		pcall(function() highlight:Destroy() end)
+		pcall(State.ClearMark, "chain")
 	end
 
 	return S
@@ -3209,6 +3563,7 @@ State.SkillCheckObj = (function()
 
 	return Class.new()
 end)()
+
 
 State.SkillCheck = State.SkillCheckObj.Settings
 Hooks.SkillCheck = function(s)
@@ -5615,10 +5970,10 @@ local function addSegment(card, label, iconName, values, fmt, width, get, set)
 	RegHook.r = refresh
 end
 
-local function addDropdown(card, label, iconName, values, fmt, get, set)
+local function addDropdown(card, label, iconName, values, fmt, get, set, buttonWidth)
 	local ctrl = addOption(card, label, iconName)
 	local btn = new("TextButton", {
-		Size = UDim2.fromOffset(104, 28),
+		Size = UDim2.fromOffset(math.clamp(tonumber(buttonWidth) or 104, 96, 180), 28),
 		BackgroundColor3 = C.Surface,
 		Text = "",
 		AutoButtonColor = false,
@@ -5703,9 +6058,17 @@ local function addDropdown(card, label, iconName, values, fmt, get, set)
 				TextColor3 = selected and C.OnAccent or C.Text,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 12,
+				TextXAlignment = buttonWidth and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center,
+				TextTruncate = Enum.TextTruncate.AtEnd,
 				AutoButtonColor = false,
 				LayoutOrder = i,
 			}, popup)
+			if buttonWidth then
+				new("UIPadding", {
+					PaddingLeft = UDim.new(0, 8),
+					PaddingRight = UDim.new(0, 8),
+				}, item)
+			end
 			corner(item, 7)
 			if not selected then
 				item.MouseEnter:Connect(function() item.BackgroundColor3 = C.Surface end)
@@ -6211,48 +6574,25 @@ do
 		if a > b then return lineRot >= a or lineRot <= b end
 		return lineRot >= a and lineRot <= b
 	end
-	local prevRot, prevAt
-	local function sweepHit(prev, cur, goal)
-		local d = ((cur - prev + 540) % 360) - 180
-		local steps = math.max(1, math.ceil(math.abs(d) / 3))
-		for k = 0, steps do
-			if inRange((prev + d * k / steps) % 360, goal) then return true end
-		end
-		return false
-	end
 	local function step()
-		if unloaded or not T.On then return end
+		if unloaded or not T.On or busy then return end
 		local pg = LP:FindFirstChildOfClass("PlayerGui")
 		if not pg then return end
-		local seen = false
 		for _, name in ipairs({ "SkillCheckPromptGui", "SkillCheckPromptGui-con" }) do
 			local prompt = pg:FindFirstChild(name)
 			if prompt and prompt.Enabled ~= false then
 				local check = prompt:FindFirstChild("Check")
 				if check and check.Visible then
 					local line = check:FindFirstChild("Line")
-					if not line then break end
+					if not line then return end
 					local target
 					for _, tn in ipairs({ "TrapPerfect", "TrapGoal" }) do
 						local c = check:FindFirstChild(tn)
 						if c and c.Visible then target = c; break end
 					end
-					if not target then break end
-					seen = true
-					local now = os.clock()
-					local cur = line.Rotation % 360
-					local goal = target.Rotation % 360
-					local press = inRange(cur, goal)
-					if prevRot and prevAt and now - prevAt < 0.2 and now > prevAt then
-						local dt = now - prevAt
-						local d = ((cur - prevRot + 540) % 360) - 180
-						local w = d / dt
-						local lead = math.clamp(dt + 0.01, 0.016, 0.06)
-						if not press and inRange((cur + w * lead) % 360, goal) then press = true end
-						if not press and sweepHit(prevRot, cur, goal) then press = true end
-					end
-					prevRot, prevAt = cur, now
-					if press and not busy then
+					if not target then return end
+					local press = inRange(line.Rotation % 360, target.Rotation % 360)
+					if press then
 						busy = true
 						task.spawn(function()
 							pcall(function() State.SkillCheckObj:_fireAction() end)
@@ -6260,11 +6600,10 @@ do
 							busy = false
 						end)
 					end
-					break
+					return
 				end
 			end
 		end
-		if not seen then prevRot, prevAt = nil, nil end
 	end
 	State.TrapSkillSet = function(v)
 		T.On = v == true
@@ -6310,8 +6649,8 @@ do
 	addSlider(card, "Max Range", "ruler", 50, 500,
 		function() return math.clamp(math.floor(tonumber(s.MaxRange) or 500), 50, 500) end,
 		function(v) s.MaxRange = v; sync() end)
-	addSlider(card, "Spear Speed", "gauge", 60, 180,
-		function() return math.clamp(math.floor(tonumber(s.SpearSpeed) or 180), 60, 180) end,
+	addSlider(card, "Spear Speed", "gauge", 60, 200,
+		function() return math.clamp(math.floor(tonumber(s.SpearSpeed) or 180), 60, 200) end,
 		function(v) s.SpearSpeed = v end)
 	addSlider(card, "Drop (x0.1)", "arrow-down", 0, 10,
 		function() return math.clamp(math.floor((tonumber(s.Drop) or 0.5) * 10 + 0.5), 0, 10) end,
@@ -6813,13 +7152,27 @@ State.StunObj = (function()
 		end
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		local sv = hum and hum:FindFirstChild("StunValue")
-		return sv ~= nil and sv.Value > 0
+		if sv ~= nil and sv.Value > 0 then return true end
+		local st = char:GetAttribute("State")
+		if type(st) == "string" and string.find(string.lower(st), "stun", 1, true) then return true end
+		for k, v in pairs(char:GetAttributes()) do
+			if type(k) == "string" and string.find(string.lower(k), "stun", 1, true) and (v == true or (type(v) == "number" and v > 0)) then return true end
+		end
+		if hum then
+			for k, v in pairs(hum:GetAttributes()) do
+				if type(k) == "string" and string.find(string.lower(k), "stun", 1, true) and (v == true or (type(v) == "number" and v > 0)) then return true end
+			end
+		end
+		return false
 	end
 
 	local function stunLeft(char)
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		local sv = hum and hum:FindFirstChild("StunValue")
 		if sv and sv:IsA("NumberValue") and sv.Value > 0 and sv.Value < 60 then return sv.Value end
+		for k, v in pairs(char:GetAttributes()) do
+			if type(k) == "string" and string.find(string.lower(k), "stun", 1, true) and type(v) == "number" and v > 0 and v < 60 then return v end
+		end
 		return nil
 	end
 
@@ -6927,8 +7280,8 @@ State.StunObj = (function()
 
 		local gui = new("BillboardGui", {
 			Name = "KINON_StunIndicator",
-			Size = UDim2.fromOffset(132, 42),
-			StudsOffset = Vector3.new(0, 3, 0),
+			Size = UDim2.fromOffset(132, 36),
+			StudsOffset = Vector3.new(0, 3.5, 0),
 			AlwaysOnTop = true,
 			LightInfluence = 0,
 			MaxDistance = 5000,
@@ -6938,7 +7291,7 @@ State.StunObj = (function()
 		local main = new("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(132, 42),
+			Size = UDim2.fromOffset(132, 36),
 			BackgroundColor3 = C.Card,
 			BackgroundTransparency = 0.05,
 			BorderSizePixel = 0,
@@ -6948,7 +7301,7 @@ State.StunObj = (function()
 		local stroke = new("UIStroke", { Color = C.Accent, Thickness = 1.2, Transparency = 0.5 }, main)
 
 		local holder = new("Frame", {
-			Position = UDim2.new(0, 6, 0, 5),
+			Position = UDim2.new(0, 6, 0, 6),
 			Size = UDim2.fromOffset(24, 24),
 			BackgroundColor3 = C.Surface,
 			BorderSizePixel = 0,
@@ -6957,8 +7310,8 @@ State.StunObj = (function()
 		icon("zap", 14, C.Text, holder)
 
 		new("TextLabel", {
-			Position = UDim2.new(0, 38, 0, 4),
-			Size = UDim2.new(1, -86, 0, 14),
+			Position = UDim2.new(0, 38, 0, 5),
+			Size = UDim2.new(1, -92, 0, 16),
 			BackgroundTransparency = 1,
 			Text = "STUNNED",
 			TextColor3 = C.Text,
@@ -6966,21 +7319,9 @@ State.StunObj = (function()
 			TextSize = 12,
 			TextXAlignment = Enum.TextXAlignment.Left,
 		}, main)
-		new("TextLabel", {
-			Position = UDim2.new(0, 38, 0, 19),
-			Size = UDim2.new(1, -46, 0, 12),
-			BackgroundTransparency = 1,
-			Text = player.DisplayName ~= "" and player.DisplayName or player.Name,
-			TextColor3 = C.Sub,
-			Font = Enum.Font.Gotham,
-			TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-		}, main)
-
 		local timeLabel = new("TextLabel", {
-			Position = UDim2.new(1, -52, 0, 4),
-			Size = UDim2.fromOffset(44, 14),
+			Position = UDim2.new(1, -52, 0, 5),
+			Size = UDim2.fromOffset(44, 16),
 			BackgroundTransparency = 1,
 			Text = "",
 			TextColor3 = C.Text,
@@ -6990,8 +7331,8 @@ State.StunObj = (function()
 		}, main)
 
 		local barTrack = new("Frame", {
-			Position = UDim2.new(0, 8, 1, -9),
-			Size = UDim2.new(1, -16, 0, 4),
+			Position = UDim2.new(0, 38, 1, -9),
+			Size = UDim2.new(1, -46, 0, 4),
 			BackgroundColor3 = C.Surface,
 			BorderSizePixel = 0,
 		}, main)
@@ -7062,7 +7403,14 @@ State.StunObj = (function()
 						startTimer(e, left)
 					end
 					if e then
-						e.timeLabel.Text = string.format("%.1fs", math.max(0, e.endAt - os.clock()))
+						local remain = e.endAt - os.clock()
+						if remain > 0.05 then
+							e.timeLabel.Text = string.format("%.1fs", remain)
+						elseif left then
+							startTimer(e, left)
+						else
+							e.timeLabel.Text = "..."
+						end
 					end
 				end
 			end
@@ -8346,16 +8694,25 @@ end
 
 do
 	local s = State.TOFSilent
-	local card = addCard(12, "eye", "Silent Aim Twist of Fate", "Status: Disabled", "TOFSilent")
-	State.TOFSilentStatus = function(text)
-		card.sub.Text = text
-	end
-	addCheckbox(card, "Predict Move", "move",
+	local card = addCard(12, "eye", "Silent Aim Twist of Fate", "", "TOFSilent")
+	addCheckbox(card, "Predict", "move",
 		function() return s.Predict end,
 		function(v) s.Predict = v end)
-	addSlider(card, "FOV", "ruler", 10, 360,
-		function() return math.clamp(math.floor((tonumber(s.FOV) or 120) / 10 + 0.5) * 10, 10, 360) end,
-		function(v) s.FOV = math.clamp(math.floor(v / 10 + 0.5) * 10, 10, 360) end)
+	addCheckbox(card, "Predict Zig-Zag", "move",
+		function() return s.ZigZag end,
+		function(v) s.ZigZag = v end)
+	addSlider(card, "Predict Lead %", "gauge", 50, 250,
+		function() return math.clamp(math.floor(tonumber(s.LeadScale) or 100), 50, 250) end,
+		function(v) s.LeadScale = v end)
+	addCheckbox(card, "Show FOV Circle", "circle",
+		function() return s.ShowCircle end,
+		function(v) s.ShowCircle = v end)
+	addCheckbox(card, "Red Laser", "scan-line",
+		function() return s.ShowLaser end,
+		function(v) s.ShowLaser = v end)
+	addSlider(card, "Silent Aim FOV", "ruler", 10, 360,
+		function() return math.clamp(math.floor(tonumber(s.FOV) or 120), 10, 360) end,
+		function(v) s.FOV = v end)
 end
 
 do
@@ -9288,6 +9645,194 @@ do
 	end
 end
 
+-- ========== FAKE PARRY (animasi parry palsu, lokal saja) ==========
+State.FakeParry = { Enabled = false, Anim = "Enten" }
+do
+	local FPY = State.FakeParry
+	local ParryFloatOn = false
+	local FAKE_ANIMS = {
+		["Enten"]               = "rbxassetid://127096285501517",
+		["Stopwatch"]           = "rbxassetid://81793464499285",
+		["Fih"]                 = "rbxassetid://123307242865945",
+		["Blood Shield"]        = "rbxassetid://75939529748815",
+		["Frying Pan"]          = "rbxassetid://74655471921270",
+		["Vampire Lord Scythe"] = "rbxassetid://117821101412772",
+		["Diamond Sword"]       = "rbxassetid://85288374151888",
+	}
+	local FAKE_ORDER = { "Enten", "Stopwatch", "Fih", "Blood Shield", "Frying Pan", "Vampire Lord Scythe", "Diamond Sword" }
+	local currentTrack, floatGui
+
+	-- putar animasi parry palsu di karakter lokal (tidak mengirim remote apa pun)
+	local function playFakeParry()
+		pcall(function()
+			local char = LP.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not hum then return end
+			local animator = hum:FindFirstChildOfClass("Animator")
+			if not animator then
+				animator = Instance.new("Animator")
+				animator.Parent = hum
+			end
+			if currentTrack then pcall(function() currentTrack:Stop() end); currentTrack = nil end
+			local anim = Instance.new("Animation")
+			anim.AnimationId = FAKE_ANIMS[FPY.Anim] or FAKE_ANIMS["Enten"]
+			local tr = animator:LoadAnimation(anim)
+			tr.Priority = Enum.AnimationPriority.Action
+			tr:Play()
+			currentTrack = tr
+		end)
+	end
+
+	-- hotkey V: putar fake parry (saat kartu Fake Parry ON)
+	track(UserInputService.InputBegan:Connect(function(input, gp)
+		if gp or unloaded or not FPY.Enabled then return end
+		if input.KeyCode == Enum.KeyCode.V then playFakeParry() end
+	end))
+
+	-- tombol melayang (gaya sama dengan tombol Auto Parry)
+	local function buildFloat()
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "KINON_FakeParryShortcut"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		gui.Parent = parent
+
+		local frame = Instance.new("Frame")
+		frame.Size = UDim2.fromOffset(142, 38)
+		frame.Position = UDim2.new(1, -138, 0.53, 0)
+		frame.BackgroundColor3 = WHITE
+		frame.BackgroundTransparency = 0.02
+		frame.Active = true
+		frame.BorderSizePixel = 0
+		frame.ZIndex = 150
+		frame.Parent = gui
+		Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 9)
+		local st = Instance.new("UIStroke")
+		st.Color = Color3.fromRGB(90, 90, 90)
+		st.Thickness = 1
+		st.Transparency = 0.12
+		st.Parent = frame
+		local grad = Instance.new("UIGradient")
+		grad.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 34, 34)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 8, 8)),
+		})
+		grad.Rotation = 90
+		grad.Parent = frame
+
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.fromScale(1, 1)
+		btn.BackgroundTransparency = 1
+		btn.Text = ""
+		btn.AutoButtonColor = false
+		btn.ZIndex = 151
+		btn.Parent = frame
+		local title = Instance.new("TextLabel")
+		title.BackgroundTransparency = 1
+		title.Position = UDim2.fromOffset(9, 0)
+		title.Size = UDim2.new(1, -18, 1, 0)
+		title.Font = Enum.Font.GothamBold
+		title.Text = "FAKE PARRY"
+		title.TextSize = 10
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.TextTruncate = Enum.TextTruncate.AtEnd
+		title.TextColor3 = C.Text
+		title.ZIndex = 152
+		title.Parent = btn
+
+		task.defer(function()
+			if not frame.Parent then return end
+			local camera = workspace.CurrentCamera
+			local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
+			local width = math.clamp(math.ceil(title.TextBounds.X) + 26, 116, 166)
+			frame.Size = UDim2.fromOffset(width, 38)
+			local pos = frame.Position
+			local px = pos.X.Scale * viewport.X + pos.X.Offset
+			local py = pos.Y.Scale * viewport.Y + pos.Y.Offset
+			frame.Position = UDim2.fromOffset(
+				math.clamp(px, 0, math.max(0, viewport.X - frame.AbsoluteSize.X)),
+				math.clamp(py, 0, math.max(0, viewport.Y - frame.AbsoluteSize.Y))
+			)
+		end)
+
+		local pressed, moved, active, startPtr, startAbs = false, false, nil, nil, nil
+		local floatConns = {}
+		local function keepFloatConn(conn)
+			floatConns[#floatConns + 1] = conn
+			return conn
+		end
+		btn.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				pressed, moved, active = true, false, input
+				startPtr, startAbs = input.Position, frame.AbsolutePosition
+			end
+		end)
+		local function moveButton(input)
+			if not pressed or not startPtr then return end
+			if input == active or input.UserInputType == Enum.UserInputType.MouseMovement then
+				local d = input.Position - startPtr
+				if d.Magnitude > 6 then moved = true end
+				if moved then
+					local cam = workspace.CurrentCamera
+					local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+					frame.Position = UDim2.fromOffset(
+						math.clamp(startAbs.X + d.X, 0, math.max(0, vp.X - frame.AbsoluteSize.X)),
+						math.clamp(startAbs.Y + d.Y, 0, math.max(0, vp.Y - frame.AbsoluteSize.Y)))
+				end
+			end
+		end
+		keepFloatConn(UserInputService.InputChanged:Connect(moveButton))
+		keepFloatConn(UserInputService.TouchMoved:Connect(moveButton))
+		keepFloatConn(UserInputService.InputEnded:Connect(function(input)
+			if not pressed then return end
+			if input == active or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				if not moved then playFakeParry() end
+				pressed, moved, active = false, false, nil
+			end
+		end))
+		gui.Destroying:Connect(function()
+			for _, conn in ipairs(floatConns) do pcall(function() conn:Disconnect() end) end
+			table.clear(floatConns)
+		end)
+		return gui
+	end
+	local function setFloat(on)
+		ParryFloatOn = on
+		if floatGui then pcall(function() floatGui:Destroy() end); floatGui = nil end
+		if on and not unloaded then floatGui = buildFloat() end
+	end
+
+	local card = addCard(5, "shield", "Fake Parry", "Animasi: " .. FPY.Anim .. "  \226\128\162  Tombol V", "FakeParry")
+	addCheckbox(card, "Floating Button Parry", "mouse-pointer-click",
+		function() return ParryFloatOn end,
+		function(v) setFloat(v) end)
+	card.sub.TextTruncate = Enum.TextTruncate.AtEnd
+	addDropdown(card, "Animation", "list", FAKE_ORDER,
+		function(v) return v end,
+		function() return FPY.Anim end,
+		function(v)
+			FPY.Anim = v
+			card.sub.Text = "Animasi: " .. v .. "  \226\128\162  Tombol V"
+		end, 144)
+
+	-- letakkan tepat di bawah Auto Parry V2: geser kartu lain (urutan >= 5) satu tingkat
+	local mine = Body:FindFirstChild("Fake Parry")
+	if mine then
+		for _, child in ipairs(Body:GetChildren()) do
+			if child ~= mine and child:IsA("GuiObject") and child.LayoutOrder >= 5 then
+				child.LayoutOrder = child.LayoutOrder + 1
+			end
+		end
+	end
+
+	State.FakeParryObj = { Destroy = function()
+		FPY.Enabled = false
+		if currentTrack then pcall(function() currentTrack:Stop() end) end
+		if floatGui then pcall(function() floatGui:Destroy() end); floatGui = nil end
+	end }
+end
+
 local Notch = new("TextButton", {
 	Name = "Notch",
 	AnchorPoint = Vector2.new(0.5, 0),
@@ -9421,6 +9966,7 @@ local function unload()
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
 	pcall(function() State.SilentObj:Destroy() end)
+	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
@@ -9434,6 +9980,7 @@ local function unload()
 	pcall(function() State.SilentChain.Destroy() end)
 	pcall(function() State.StunObj.Destroy() end)
 	pcall(function() State.Moonwalk.Destroy() end)
+	pcall(function() State.FakeParryObj.Destroy() end)
 
 	for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
 	table.clear(connections)
