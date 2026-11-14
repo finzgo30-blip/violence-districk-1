@@ -497,21 +497,21 @@ State.PlayerESPObj = (function()
 
 	function Class:Start()
 		self.Settings.Enabled = true
-		self:_tick()
-		if self._loop then return end
-		self._loop = task.spawn(function()
-			while self.Settings.Enabled and not unloaded do
-				task.wait(self.Settings.Tick)
+		self._gen = (self._gen or 0) + 1
+		local gen = self._gen
+		task.spawn(function()
+			while self.Settings.Enabled and self._gen == gen and not unloaded do
 				pcall(function() self:_tick() end)
+				task.wait(math.max(tonumber(self.Settings.Tick) or 0.2, 0.05))
 			end
-			self._loop = nil
 		end)
 	end
 
 	function Class:Stop()
 		self.Settings.Enabled = false
-		for _, p in ipairs(Players:GetPlayers()) do self:_cleanup(p.Character) end
-		self:_clearWarn()
+		self._gen = (self._gen or 0) + 1
+		for _, p in ipairs(Players:GetPlayers()) do pcall(function() self:_cleanup(p.Character) end) end
+		pcall(function() self:_clearWarn() end)
 	end
 
 	function Class:Refresh()
@@ -631,6 +631,13 @@ State.WorldESPObj = (function()
 	end
 
 	function Class:_scan(force)
+		if self._scanBusy then return end
+		self._scanBusy = true
+		pcall(self._scanInner, self, force)
+		self._scanBusy = false
+	end
+
+	function Class:_scanInner(force)
 		local now = tick()
 		if not force and (now - self._lastScan) < self.Settings.ScanInterval then return end
 		self._lastScan = now
@@ -955,22 +962,21 @@ State.WorldESPObj = (function()
 
 	function Class:Start()
 		self.Settings.Enabled = true
-		self:_scan(true)
-		self:Refresh()
-
-		if self._tickThread then return end
-		self._tickThread = task.spawn(function()
-			while self.Settings.Enabled and not unloaded do
-				task.wait(self.Settings.TickInterval)
+		self._gen = (self._gen or 0) + 1
+		local gen = self._gen
+		task.spawn(function()
+			pcall(function() self:_scan(true) end)
+			while self.Settings.Enabled and self._gen == gen and not unloaded do
 				pcall(function() self:Refresh() end)
+				task.wait(math.max(tonumber(self.Settings.TickInterval) or 0.5, 0.1))
 			end
-			self._tickThread = nil
 		end)
 	end
 
 	function Class:Stop()
 		self.Settings.Enabled = false
-		self:Clear()
+		self._gen = (self._gen or 0) + 1
+		pcall(function() self:Clear() end)
 	end
 
 	function Class:Rescan()
@@ -1291,8 +1297,9 @@ State.SpearObj = (function()
 		local launchSpeed = math.clamp((chargeTime or BAL.FullChargeTime) * speed, 1, speed)
 		local gVec = getGravity()
 		local gMag = math.abs(gVec.Y)
-		local latency = getPingHalf() + 0.03 + 0.13 * math.clamp((dist - 40) / 160, 0, 1)
-		local leadMul = 1.4
+		local farLead = math.clamp((dist - 40) / 120, 0, 1)
+		local latency = getPingHalf() + 0.03 + 0.06 * math.clamp((dist - 40) / 160, 0, 1)
+		local leadMul = 1.4 - 0.55 * farLead
 		local aimPoint = hrp.Position + Vector3.new(0, 0.2, 0)
 		if dist > 100 then
 			local head = targetChar:FindFirstChild("Head")
@@ -1301,7 +1308,7 @@ State.SpearObj = (function()
 
 		local vel = clampVelY(estimateVelocity(targetChar, hrp))
 		if V.Predict == false then vel = Vector3.zero end
-		local maxLead = math.clamp(dist * 0.6, 3, 45)
+		local maxLead = math.clamp(dist * (0.6 - 0.25 * farLead), 3, 45 - 17 * farLead)
 		local function leadOffset(tt)
 			local off = vel * ((tt + latency) * leadMul)
 			if off.Magnitude > maxLead then off = off.Unit * maxLead end
@@ -2365,9 +2372,24 @@ State.SilentObj = (function()
 		return base + u * (sgn * A * math.sin(math.pi * phase) * conf)
 	end
 
+	local lastMoveAt = setmetatable({}, { __mode = "k" })
 	local function aimPoint(part, from)
 		local pos = part.Position
 		if not (T.Predict or T.ZigZag) then return pos end
+		do
+			local ch0 = part.Parent
+			local hrp0 = ch0 and ch0:FindFirstChild("HumanoidRootPart")
+			local hum0 = ch0 and ch0:FindFirstChildOfClass("Humanoid")
+			local now = os.clock()
+			local moving = false
+			if hrp0 then
+				local v1 = flat(hrp0.AssemblyLinearVelocity).Magnitude
+				local v2 = flat(getVelocity(part, hrp0, hum0)).Magnitude
+				moving = v1 > 2.5 or v2 > 2.5
+			end
+			if moving or not lastMoveAt[part] then lastMoveAt[part] = now end
+			if now - lastMoveAt[part] > 0.25 then return pos end
+		end
 		if T.ZigZag then
 			local zp = zigzagPoint(part, from)
 			if zp then return zp end
@@ -3814,71 +3836,32 @@ State.SkillCheckObj = (function()
 		local controls = mob:FindFirstChild("Controls")
 		if not controls then return nil end
 		local action = controls:FindFirstChild("action")
-		if action then return action:FindFirstChild("check") or action end
-		return controls:FindFirstChild("check")
-	end
-
-	function Class:_fireInstant()
-		if UserInputService.TouchEnabled then
-			local pGui = LP:FindFirstChildOfClass("PlayerGui")
-			local btn = pGui
-			for seg in string.gmatch("Survivor-mob.Controls.action.check", "[^%.]+") do
-				btn = btn and btn:FindFirstChild(seg)
-			end
-			if btn and btn:IsA("GuiObject") then
-				local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
-				local inset = GuiService:GetGuiInset()
-				local cx = pos.X + size.X / 2 + inset.X
-				local cy = pos.Y + size.Y / 2 + inset.Y
-				pcall(function()
-					VirtualInputManager:SendTouchEvent(8822, 0, cx, cy)
-					task.wait(0.01)
-					VirtualInputManager:SendTouchEvent(8822, 2, cx, cy)
-				end)
-				return true
-			end
-			return self:_fireAction()
-		end
-		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait(0.01)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-		end)
-		return true
+		if action and action:IsA("GuiObject") then return action end
+		return controls:FindFirstChild("check", true)
 	end
 
 	function Class:_fireAction()
 		local btn = self:_getActionButton()
-
-		if btn and btn:IsA("GuiObject") and btn.Visible and type(firesignal) == "function" then
+		if UserInputService.TouchEnabled and btn and btn:IsA("GuiObject")
+			and btn.Visible and btn.AbsoluteSize.X > 0 and btn.AbsoluteSize.Y > 0 then
 			local ok = pcall(function()
-				firesignal(btn.MouseButton1Down)
-				task.wait(0.005)
-				firesignal(btn.MouseButton1Up)
-			end)
-			if ok then return true end
-		end
-
-		if btn and btn:IsA("GuiObject") and btn.Visible then
-			local ok = pcall(function()
-				local ap, as = btn.AbsolutePosition, btn.AbsoluteSize
+				local p, z = btn.AbsolutePosition, btn.AbsoluteSize
 				local inset = GuiService:GetGuiInset()
-				local id = 8822 + math.random(1, 9999)
-				local x = ap.X + as.X / 2 + inset.X
-				local y = ap.Y + as.Y / 2 + inset.Y
+				local x, y = p.X + z.X * 0.5 + inset.X, p.Y + z.Y * 0.5 + inset.Y
+				local id = 8822
 				VirtualInputManager:SendTouchEvent(id, 0, x, y)
-				task.wait(0.005)
+				task.wait(0.025)
 				VirtualInputManager:SendTouchEvent(id, 2, x, y)
 			end)
 			if ok then return true end
 		end
 
-		pcall(function()
+		local ok = pcall(function()
 			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-			task.wait(0.005)
+			task.wait(0.025)
 			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
 		end)
-		return true
+		return ok
 	end
 
 	function Class:_inAngleRange(lineRot, goalRot, minOff, maxOff)
@@ -3902,49 +3885,62 @@ State.SkillCheckObj = (function()
 	function Class:_onHeartbeat()
 		if not self.Settings.Enabled or self._busy then return end
 
-		local check
+		local scGui
 		for _, guiName in ipairs({ "SkillCheckPromptGui", "SkillCheckPromptGui-con" }) do
-			local gui = PlayerGui:FindFirstChild(guiName)
-			local candidate = gui and gui.Enabled ~= false and gui:FindFirstChild("Check")
-			if candidate and candidate.Visible then
-				check = candidate
-				break
+			local candidate = PlayerGui:FindFirstChild(guiName)
+			if candidate and candidate.Enabled ~= false then
+				local c = candidate:FindFirstChild("Check")
+				if c and c.Visible then scGui = candidate; break end
 			end
 		end
-		if not check then
-			self._randomModeIsNormal = false
+		if not scGui then return end
+
+		local check = scGui:FindFirstChild("Check")
+		if not check or not check.Visible then return end
+		local line = check:FindFirstChild("Line")
+		if not line then return end
+
+		local mode = self.Settings.Mode
+		local goal = check:FindFirstChild("Goal")
+		local trap = check:FindFirstChild("TrapPerfect") or check:FindFirstChild("TrapGoal")
+
+		if mode == "Instant" then
+			local target = trap and trap.Visible and trap or (goal and goal.Visible and goal)
+			if not target then return end
+			self._busy = true
+			task.spawn(function()
+				local fired = false
+				local ok = pcall(function()
+					-- Move the local indicator into the hit window, then send one real input.
+					line.Rotation = (target.Rotation + self.Settings.InstantOffset) % 360
+					RunService.Heartbeat:Wait()
+					fired = self:_fireAction()
+				end)
+				if fired and ok then
+					self.Stats.Hits = self.Stats.Hits + 1
+				else
+					self.Stats.Missed = self.Stats.Missed + 1
+				end
+				task.wait(math.max(0.12, self.Settings.BusyResetDelay))
+				self._busy = false
+			end)
 			return
 		end
 
-		local line = check:FindFirstChild("Line")
-		local goal = check:FindFirstChild("Goal")
-		if not line or not goal then return end
-		local trapA = check:FindFirstChild("TrapPerfect")
-		local trapB = check:FindFirstChild("TrapGoal")
-		if (trapA and trapA.Visible) or (trapB and trapB.Visible) then return end
-
-		local instant = self.Settings.Mode == "Instant"
-		local fireNow
-		if instant then
-			line.Rotation = goal.Rotation + self.Settings.InstantOffset
-			fireNow = true
-		else
-			fireNow = self:_shouldFireByRange(line.Rotation % 360, goal.Rotation % 360)
-		end
-
-		if not fireNow then return end
+		if not goal then return end
+		if (check:FindFirstChild("TrapPerfect") and check.TrapPerfect.Visible)
+			or (check:FindFirstChild("TrapGoal") and check.TrapGoal.Visible) then return end
+		if not self:_shouldFireByRange(line.Rotation % 360, goal.Rotation % 360) then return end
 
 		self._busy = true
 		task.spawn(function()
-			local ok = pcall(function()
-				if instant then self:_fireInstant() else self:_fireAction() end
-			end)
+			local ok = self:_fireAction()
 			if ok then
 				self.Stats.Hits = self.Stats.Hits + 1
 			else
 				self.Stats.Missed = self.Stats.Missed + 1
 			end
-			task.wait(instant and 0.2 or self.Settings.BusyResetDelay)
+			task.wait(self.Settings.BusyResetDelay)
 			self._busy = false
 		end)
 	end
@@ -4465,6 +4461,7 @@ State.PerfObj = (function()
 		while cur and cur ~= workspace and depth < 12 do
 			if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return false end
 			if (cur:IsA("Model") or cur == inst) and matchPlain(cur.Name, GAMEPLAY_WORDS) then return false end
+			if not nameAny and (cur:IsA("Model") or cur == inst) and matchPlain(cur.Name, EXCLUDE_WORDS) then return false end
 			if nameHit(self, cur.Name) then
 				nameAny = true
 			elseif cur:IsA("Model") and treeModel(self, cur) then
@@ -4565,6 +4562,13 @@ State.PerfObj = (function()
 			for _, p in ipairs(GRASS_PATTERNS) do table.insert(patterns, p) end
 		end
 		local custom = {}
+		if S.RemoveTree then
+			for _, w in ipairs({
+				"beechwoodtreevar0", "beechwoodtreevar2", "beechwoodtreevar3", "bushvar1",
+				"deadredwoodtreevar1", "dogwoodtreevar0", "fernvar1", "mapleleaftreevar0",
+				"redwoodtreevar0", "redwoodtreevar1", "leaves", "trunk",
+			}) do table.insert(custom, w) end
+		end
 		if #patterns > 0 then
 			for part in string.gmatch(string.lower(S.Keywords or ""), "[^,]+") do
 				local word = part:match("^%s*(.-)%s*$")
@@ -4587,12 +4591,19 @@ State.PerfObj = (function()
 		if self._removeConn then self._removeConn:Disconnect() end
 		if self._removeConn2 then self._removeConn2:Disconnect() end
 		local queue, head = {}, 1
+		local spent = 0
 		self._removeConn = workspace.DescendantAdded:Connect(function(d)
-			if self._removeActive and gen == self._removeGen then
+			if not (self._removeActive and gen == self._removeGen) then return end
+			if spent < 0.003 then
+				local t0 = os.clock()
+				pcall(hideInst, self, d)
+				spent = spent + (os.clock() - t0)
+			else
 				queue[#queue + 1] = d
 			end
 		end)
 		self._removeConn2 = RunService.RenderStepped:Connect(function()
+			spent = 0
 			if head > #queue then
 				if head > 1 then queue, head = {}, 1 end
 				return
@@ -7347,24 +7358,42 @@ local function createCard(title, iconName, category, order)
             setValue(minValue + (maxValue - minValue) * a)
         end
 
+        local pending, pendingInput, pendingStart = false, nil, nil
         track(hit.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
                 dragging = true
                 setScrollLock(true)
                 setFromX(input.Position.X)
+            elseif input.UserInputType == Enum.UserInputType.Touch then
+                pending = true
+                pendingInput = input
+                pendingStart = Vector2.new(input.Position.X, input.Position.Y)
             end
         end))
         track(UserInputService.InputChanged:Connect(function(input)
-            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-                or input.UserInputType == Enum.UserInputType.Touch) then
-                setFromX(input.Position.X)
+            if dragging then
+                if input.UserInputType == Enum.UserInputType.MouseMovement
+                    or input.UserInputType == Enum.UserInputType.Touch then
+                    setFromX(input.Position.X)
+                end
+            elseif pending and input.UserInputType == Enum.UserInputType.Touch and input == pendingInput then
+                local dx = math.abs(input.Position.X - pendingStart.X)
+                local dy = math.abs(input.Position.Y - pendingStart.Y)
+                if dx >= 6 and dx > dy * 1.2 then
+                    pending = false
+                    dragging = true
+                    setScrollLock(true)
+                    setFromX(input.Position.X)
+                elseif dy >= 6 then
+                    pending = false
+                end
             end
         end))
         track(UserInputService.InputEnded:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
                 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = false
+                pending = false
                 setScrollLock(false)
             end
         end))
@@ -8166,6 +8195,9 @@ local function setMinimized(value)
     FloatingButton.Visible = true
 end
 
+track(Minimize.Activated:Connect(function() setMinimized(true) end))
+track(Minimize.MouseButton1Click:Connect(function() setMinimized(true) end))
+
 local FLOAT = 46
 local floatX, floatY = 14, 200
 do
@@ -8917,19 +8949,17 @@ local function pillIcon(parent, iconName, width, order)
 end
 
 
-State.SkillCheckTrap = { On = false, Mode = "Legit" }
+State.SkillCheckTrap = { On = false, Mode = "Instant" }
 do
 	local T = State.SkillCheckTrap
 	local conn
 	local busy = false
-
 	local function inRange(lineRot, goalRot)
 		local a = (goalRot + 102) % 360
 		local b = (goalRot + 116) % 360
 		if a > b then return lineRot >= a or lineRot <= b end
 		return lineRot >= a and lineRot <= b
 	end
-
 	local function step()
 		if unloaded or not T.On or busy then return end
 		local pg = LP:FindFirstChildOfClass("PlayerGui")
@@ -8947,37 +8977,40 @@ do
 						if c and c.Visible then target = c; break end
 					end
 					if not target then return end
+
 					local instant = T.Mode == "Instant"
-					local press
+					local shouldPress = false
 					if instant then
-						line.Rotation = target.Rotation + 109
-						press = true
+						-- Align the local marker with the trap's hit window before sending input.
+						line.Rotation = (target.Rotation + 109) % 360
+						shouldPress = true
 					else
-						press = inRange(line.Rotation % 360, target.Rotation % 360)
+						shouldPress = inRange(line.Rotation % 360, target.Rotation % 360)
 					end
-					if press then
+
+					if shouldPress then
 						busy = true
 						task.spawn(function()
-							pcall(function()
-								if instant then State.SkillCheckObj:_fireInstant() else State.SkillCheckObj:_fireAction() end
+							local fired = false
+						pcall(function()
+								if instant then RunService.Heartbeat:Wait() end
+								fired = State.SkillCheckObj:_fireAction()
 							end)
-							task.wait(instant and 0.2 or 0.05)
-							busy = false
-						end)
+						-- Longer lockout for instant mode prevents duplicate taps while the prompt closes.
+						task.wait(instant and 0.4 or 0.05)
+						busy = false
+					end)
 					end
 					return
 				end
 			end
 		end
 	end
-
 	State.TrapSkillSet = function(v)
 		T.On = v == true
 		if conn then conn:Disconnect(); conn = nil end
 		busy = false
-		if T.On then
-			conn = RunService.RenderStepped:Connect(function() pcall(step) end)
-		end
+		if T.On then conn = RunService.RenderStepped:Connect(function() pcall(step) end) end
 	end
 end
 
@@ -8985,6 +9018,7 @@ do
 	local s = State.SkillCheck
 	local obj = State.SkillCheckObj
 	local card = addCard(0, "target", "Auto Skill Check", "", "SkillCheck")
+	if s.Mode ~= "Legit" and s.Mode ~= "Normal" then obj:SetMode("Legit") end
 	local function sync() card.sub.Text = "Mode: " .. s.Mode end
 	sync()
 	addDropdown(card, "Mode", "list", { "Legit", "Normal" },
@@ -8998,7 +9032,7 @@ do
 	addDropdown(card, "Trap Mode", "list", { "Legit", "Instant" },
 		function(v) return v end,
 		function() return T.Mode end,
-		function(v) T.Mode = (v == "Instant") and "Instant" or "Legit" end)
+		function(v) T.Mode = v end)
 end
 
 do
@@ -10592,6 +10626,7 @@ State.Utilities = {
 	AutoRun = false,
 	AlwaysFastVaultS = false, UnlimitedVaultS = false,
 	AutoDodgeAbyssS = false,
+	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13,
 	DashRadius = 50, AimRadius = 50,
 }
 State.UtilityHandlers = {}
@@ -10602,6 +10637,7 @@ State.UtilGroup = {
 	AntiBlindFlashlightK = "UtilitiesK", DashLockK = "UtilitiesK", AimlockAttackK = "UtilitiesK",
 	PalletReflexS = "UtilitiesS", AlwaysFastVaultS = "UtilitiesS",
 	UnlimitedVaultS = "UtilitiesS", AutoDodgeAbyssS = "UtilitiesS",
+	VaultSpeedS = "UtilitiesS", FlowstateS = "UtilitiesS",
 }
 local function applyUtilities()
 	local u = State.Utilities
@@ -10776,6 +10812,41 @@ do
 
 	State.UtilityHandlers.UnlimitedVaultS = function(state)
 		if state then EnableUnlimitedVault() else DisableUnlimitedVault() end
+	end
+end
+
+do
+	local U = State.Utilities
+	local vaultConn, flowConn
+
+	State.UtilityHandlers.VaultSpeedS = function(state)
+		if vaultConn then vaultConn:Disconnect(); vaultConn = nil end
+		if state then
+			vaultConn = RunService.Heartbeat:Connect(function()
+				local char = LP.Character
+				if char then
+					pcall(function() char:SetAttribute("vaultspeed", (tonumber(U.VaultSpeed) or 13) / 10) end)
+				end
+			end)
+		else
+			local char = LP.Character
+			if char then pcall(function() char:SetAttribute("vaultspeed", 1) end) end
+		end
+	end
+
+	State.UtilityHandlers.FlowstateS = function(state)
+		if flowConn then flowConn:Disconnect(); flowConn = nil end
+		if state then
+			flowConn = RunService.Heartbeat:Connect(function()
+				local char = LP.Character
+				if char and char:GetAttribute("Flowstate") ~= true then
+					pcall(function() char:SetAttribute("Flowstate", true) end)
+				end
+			end)
+		else
+			local char = LP.Character
+			if char then pcall(function() char:SetAttribute("Flowstate", false) end) end
+		end
 	end
 end
 do
@@ -11300,6 +11371,11 @@ do
 	util(surv, "Always Fast Vault", "zap", "AlwaysFastVaultS")
 	util(surv, "Unlimited Vault", "infinity", "UnlimitedVaultS")
 	util(surv, "Auto Dodge Abyss", "shield", "AutoDodgeAbyssS")
+	util(surv, "Vault & Slide Speed", "zap", "VaultSpeedS")
+	addSlider(surv, "Vault & Slide Speed Level", "gauge", 10, 20,
+		function() return math.clamp(math.floor(tonumber(s.VaultSpeed) or 13), 10, 20) end,
+		function(v) s.VaultSpeed = v end)
+	util(surv, "Flowstate (No CD)", "zap", "FlowstateS")
 	addSlider(surv, "Pallet Reflex Distance", "ruler", 5, 80,
 		function() return math.clamp(math.floor(tonumber(State.PalletDist) or 20), 5, 80) end,
 		function(v) State.PalletDist = v end)
