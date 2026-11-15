@@ -5976,7 +5976,14 @@ local function KINON_TryParry(reason, killerRoot)
 		KINON_ParryEngine.CooldownStuckSince = nil
 	end
 	if client and client.isParryResolving then return false end
-	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.3 then return false end
+	-- cek tambahan dari ParryClient sendiri (CanUse = false saat dagger belum siap)
+	if client and type(client.CanUse) == "function" then
+		local okUse, canUse = pcall(client.CanUse, client)
+		if okUse and canUse == false then return false end
+	end
+	-- kunci lokal: flag cooldown game bisa telat menyala, jadi setelah parry berhasil
+	-- jangan panggil lagi sebentar walau flag belum terbaca
+	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.35 then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
 
@@ -6970,12 +6977,14 @@ local function relayoutColumns()
     local leftHeight, rightHeight = 0, 0
     for order, record in ipairs(visible) do
         record.Frame.LayoutOrder = order
+        local realHeight = record.Frame.AbsoluteSize.Y
+        local h = (realHeight and realHeight > 20) and realHeight or record.Height
         if single or leftHeight <= rightHeight then
             record.Frame.Parent = LeftColumn
-            leftHeight += record.Height + 8
+            leftHeight += h + 8
         else
             record.Frame.Parent = RightColumn
-            rightHeight += record.Height + 8
+            rightHeight += h + 8
         end
     end
 
@@ -7740,6 +7749,10 @@ if buildFeatures then
     if not ok then warn("Kinon features error: " .. tostring(err)) end
 end
 
+local showFpsCounter, showPingCounter, statsLocked = true, true, false
+local applyStatsVisibility, applyStatsLockVisual
+local statsFpsToggleHandle, statsPingToggleHandle, statsLockToggleHandle
+
 local interface = createCard("INTERFACE", "sliders-horizontal", "UI")
 interface:slider("UI Scale (%)", 40, 100, 100, function(value)
     userScale = value / 100
@@ -7748,7 +7761,18 @@ end)
 interface:toggle("Lock Position", false, function(value)
     lockPosition = value
 end)
-interface:toggle("Show FPS", true)
+statsFpsToggleHandle = interface:toggle("Show FPS Counter", true, function(value)
+    showFpsCounter = value
+    if applyStatsVisibility then applyStatsVisibility() end
+end)
+statsPingToggleHandle = interface:toggle("Show Ping Counter", true, function(value)
+    showPingCounter = value
+    if applyStatsVisibility then applyStatsVisibility() end
+end)
+statsLockToggleHandle = interface:toggle("Lock FPS Counter", false, function(value)
+    statsLocked = value
+    if applyStatsLockVisual then applyStatsLockVisual() end
+end)
 interface:toggle("Notifications", true)
 
 local runAutoload
@@ -8413,6 +8437,9 @@ do
     end))
 end
 
+-- dideklarasikan lebih dulu: loop FPS di bawah dibuat sebelum label-nya, jadi tanpa ini variabelnya nil
+local StatsFpsLabel, StatsPingLabel
+
 do
     local frames = 0
     local lastUpdate = os.clock()
@@ -8426,6 +8453,7 @@ do
         frames, lastUpdate = 0, now
         setFps(tostring(fps))
         setUptime(formatClock(now - executedAt))
+        if StatsFpsLabel then StatsFpsLabel.Text = fps .. " FPS" end
 
         local ping
         pcall(function()
@@ -8435,6 +8463,7 @@ do
             pcall(function() ping = math.floor(LocalPlayer:GetNetworkPing() * 1000 + 0.5) end)
         end
         setPing(ping and (ping .. " ms") or "-- ms")
+        if StatsPingLabel then StatsPingLabel.Text = ping and (ping .. " ms") or "-- ms" end
     end))
 end
 
@@ -8524,16 +8553,214 @@ track(UserInputService.InputEnded:Connect(function(input)
         if not wasMoved then setMinimized(Main.Visible) end
     end
 end))
+local StatsFloat = make("Frame", {
+    Name = "KinonStatsFloat",
+    Size = UDim2.fromOffset(118, 30),
+    Position = UDim2.fromOffset(14, 150),
+    BackgroundColor3 = Theme.Panel,
+    BorderSizePixel = 0,
+    ZIndex = 20,
+}, ScreenGui)
+corner(StatsFloat, 9)
+local statsStroke = stroke(StatsFloat, Color3.fromRGB(120, 120, 120), 1, 0.2)
+
+StatsFpsLabel = make("TextLabel", {
+    Position = UDim2.fromOffset(10, 0),
+    Size = UDim2.new(0.5, -14, 1, 0),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBold,
+    Text = "-- FPS",
+    TextColor3 = Theme.Text,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    ZIndex = 21,
+}, StatsFloat)
+
+StatsPingLabel = make("TextLabel", {
+    Position = UDim2.new(0.5, -4, 0, 0),
+    Size = UDim2.new(0.5, -18, 1, 0),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBold,
+    Text = "-- ms",
+    TextColor3 = Theme.Text,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    ZIndex = 21,
+}, StatsFloat)
+
+function applyStatsVisibility()
+    StatsFpsLabel.Visible = showFpsCounter
+    StatsPingLabel.Visible = showPingCounter
+    StatsFloat.Visible = showFpsCounter or showPingCounter
+end
+applyStatsVisibility()
+
+local StatsLockBtn = make("TextButton", {
+    AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -6, 0.5, 0),
+    Size = UDim2.fromOffset(20, 20),
+    BackgroundTransparency = 1,
+    Text = "",
+    AutoButtonColor = false,
+    ZIndex = 21,
+}, StatsFloat)
+
+local statsLockIcon
+local function refreshStatsLockIcon()
+    if statsLockIcon then statsLockIcon:Destroy() end
+    statsLockIcon = icon(StatsLockBtn, statsLocked and "lock" or "lock-open", 14,
+        statsLocked and Theme.Accent or Theme.Muted)
+end
+refreshStatsLockIcon()
+
+local STATS_W, STATS_H = 118, 30
+local statsX, statsY = 14, 150
+local function placeStats()
+    local sz = ScreenGui.AbsoluteSize
+    statsX = math.clamp(statsX, 0, math.max(sz.X - STATS_W, 0))
+    statsY = math.clamp(statsY, 0, math.max(sz.Y - STATS_H, 0))
+    StatsFloat.Position = UDim2.fromOffset(statsX, statsY)
+end
+placeStats()
+track(ScreenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeStats))
+
+local statsDrag = { active = false, moved = false }
+track(StatsFloat.InputBegan:Connect(function(input)
+    if statsLocked then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        statsDrag.active = true
+        statsDrag.moved = false
+        statsDrag.input = input
+        statsDrag.start = Vector2.new(input.Position.X, input.Position.Y)
+        statsDrag.fx, statsDrag.fy = statsX, statsY
+    end
+end))
+track(UserInputService.InputChanged:Connect(function(input)
+    if not statsDrag.active then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    if input.UserInputType == Enum.UserInputType.Touch and input ~= statsDrag.input then return end
+    local delta = Vector2.new(input.Position.X, input.Position.Y) - statsDrag.start
+    if not statsDrag.moved and delta.Magnitude < 8 then return end
+    statsDrag.moved = true
+    statsX = statsDrag.fx + delta.X
+    statsY = statsDrag.fy + delta.Y
+    placeStats()
+end))
+track(UserInputService.InputEnded:Connect(function(input)
+    if not statsDrag.active then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        statsDrag.active = false
+        statsDrag.moved = false
+    end
+end))
+
+function applyStatsLockVisual()
+    refreshStatsLockIcon()
+    statsStroke.Color = statsLocked and Theme.Accent or Color3.fromRGB(120, 120, 120)
+end
+applyStatsLockVisual()
+
+track(StatsLockBtn.MouseButton1Click:Connect(function()
+    statsLocked = not statsLocked
+    applyStatsLockVisual()
+    if statsLockToggleHandle then statsLockToggleHandle.Refresh(statsLocked) end
+end))
+
 local function destroyUI()
     for _, connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
     table.clear(connections)
     if ScreenGui then ScreenGui:Destroy() end
 end
 
-track(Close.MouseButton1Click:Connect(function()
+local confirmOverlay
+local function closeConfirm()
+    if confirmOverlay then
+        confirmOverlay:Destroy()
+        confirmOverlay = nil
+    end
+end
+
+local function confirmClose()
     if type(_G.KinonHubBetaUnload) == "function" then pcall(_G.KinonHubBetaUnload) end
     destroyUI()
-end))
+end
+
+local function openConfirm()
+    if confirmOverlay then return end
+    local overlay = make("Frame", {
+        Name = "CloseConfirm",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.new(0, 0, 0),
+        BackgroundTransparency = 0.45,
+        BorderSizePixel = 0,
+        Active = true,
+        ZIndex = 900,
+    }, ScreenGui)
+    confirmOverlay = overlay
+    local box = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(290, 132),
+        BackgroundColor3 = Theme.Panel,
+        BorderSizePixel = 0,
+        ZIndex = 901,
+    }, overlay)
+    corner(box, 12)
+    stroke(box, Theme.StrokeLight, 1, 0.2)
+    make("TextLabel", {
+        Position = UDim2.fromOffset(16, 12),
+        Size = UDim2.new(1, -32, 0, 20),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = "Close Kinon Hub?",
+        TextColor3 = Theme.Text,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 902,
+    }, box)
+    make("TextLabel", {
+        Position = UDim2.fromOffset(16, 36),
+        Size = UDim2.new(1, -32, 0, 36),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        Text = "Are you sure you want to close this UI?",
+        TextColor3 = Theme.Muted,
+        TextSize = 12,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        ZIndex = 902,
+    }, box)
+    local function button(text, x, color, textColor, handler)
+        local b = make("TextButton", {
+            Position = UDim2.new(x, x == 0 and 16 or 4, 1, -46),
+            Size = UDim2.new(0.5, -20, 0, 32),
+            BackgroundColor3 = color,
+            BorderSizePixel = 0,
+            AutoButtonColor = true,
+            Font = Enum.Font.GothamBold,
+            Text = text,
+            TextColor3 = textColor,
+            TextSize = 13,
+            ZIndex = 902,
+        }, box)
+        corner(b, 8)
+        b.Activated:Connect(handler)
+        return b
+    end
+    button("Close", 0, Theme.Panel3, Theme.Text, closeConfirm)
+    button("Continue", 0.5, Theme.Text, Theme.Black, function()
+        closeConfirm()
+        confirmClose()
+    end)
+end
+
+track(Close.MouseButton1Click:Connect(openConfirm))
 
 local dragging = false
 local dragInput, dragStart, startPosition
@@ -8595,11 +8822,11 @@ local function KinonBuildFeatures(api)
 		UtilitiesS = "SURV", UtilitiesK = "KILL",
 	}
 	local ORDER = {
-		Parry = 1, ParryV2 = 2, FakeParry = 3, SkillCheck = 4, TOF = 5, TOFSilent = 6, AimFlash = 7,
-		Spear = 10, SpearAimlock = 11, SilentChain = 12,
-		ESPPlayer = 20, ESPWorld = 21, AvatarVisual = 22, WorldSettings = 23, CameraSettings = 24,
-		Moonwalk = 30, Utilities = 31, AutoPumpkin = 32,
-		UtilitiesS = 8, UtilitiesK = 13,
+		SkillCheck = 1, Parry = 2, ParryV2 = 3, FakeParry = 4, TOF = 5, TOFSilent = 6, AimFlash = 7,
+		UtilitiesS = 8,
+		Spear = 10, SpearAimlock = 11, SilentChain = 12, UtilitiesK = 13,
+		ESPPlayer = 20, ESPWorld = 21, WorldSettings = 22, CameraSettings = 23, AvatarVisual = 24,
+		Utilities = 30, Moonwalk = 31, AutoPumpkin = 32,
 	}
 
 	local function rowLabel(row, text, reserve)
@@ -10690,471 +10917,390 @@ State.SpectatorCounter = (function()
 	return SC
 end)()
 
--- ================== Killer Skill Cooldown (HUD) ==================
-State.KillerCD = (function()
-	local CollectionService = game:GetService("CollectionService")
-	local ReplicatedStorage = game:GetService("ReplicatedStorage")
-	local K = { Enabled = false }
+-- ================== Killer Perks Display (HUD) ==================
+State.KillerPerks = (function()
+	local KP = { Enabled = false, Gui = nil }
+	local WIDTH, HEADER_H, ROW_H = 190, 30, 20
+	local MAX_PERKS = 6
+	local position = UDim2.fromOffset(12, 64)
+	local minimized = false
+	local signature = nil
+	local conns = {}
+	local ui = {}
 
-	local MOVES = {
-		Slasher     = { name = "Slasher",     move1 = "rbxassetid://134862031194933", move2 = "rbxassetid://136973921948245", move1Name = "Heavy Slash",    move2Name = "Surge Dash",   move1CD = 10.0, move2CD = 12.0, missCD = 1.4 },
-		Stalker     = { name = "Stalker",     move1 = "rbxassetid://85894094209457",  move2 = "rbxassetid://110045688062234", move1Name = "Stalk Mode",     move2Name = "Evil Surge",   move1CD = 10.0, move2CD = 12.0, missCD = 1.5 },
-		Masked      = { name = "Masked",      move1 = "rbxassetid://110441838520158", move2 = "rbxassetid://95375588266919",  move1Name = "Frenzy Sprint",  move2Name = "Deep Wound",   move1CD = 15.0, move2CD = 10.0, missCD = 1.5 },
-		Killer      = { name = "Nina",        move1 = "rbxassetid://108114231850675", move2 = "rbxassetid://95375588266919",  move1Name = "Shadow Step",    move2Name = "Agony Lunge",  move1CD = 10.0, move2CD = 12.0, missCD = 1.5 },
-		Hidden      = { name = "Hidden",      move1 = "rbxassetid://129570234771869", move2 = "rbxassetid://130915693370693", move1Name = "Phantom Dash",   move2Name = "Leap Vault",   move1CD = 12.0, move2CD = 8.0,  missCD = 1.5 },
-		Abysswalker = { name = "Abysswalker", move1 = "rbxassetid://86213737463907",  move2 = "rbxassetid://100395868673407", move1Name = "Abyssal Wave",   move2Name = "Shadow Leap",  move1CD = 8.0,  move2CD = 10.0, missCD = 1.5 },
-		Veil        = { name = "Veil",        move1 = "rbxassetid://110881025348309", move2 = "rbxassetid://95375588266919",  move1Name = "Spear Throw",    move2Name = "Spear Reload", move1CD = 8.0,  move2CD = 3.5,  missCD = 1.5 },
-		Cure        = { name = "The Cure",    move1 = "rbxassetid://119792658841268", move2 = "rbxassetid://81019828986691",  move1Name = "Corrosive Flask", move2Name = "Gas Cloud",   move1CD = 10.0, move2CD = 12.0, missCD = 1.5 },
-		Butcher     = { name = "Butcher",     move1 = "rbxassetid://121475438777829", move2 = "rbxassetid://95375588266919",  move1Name = "Chain Throw",    move2Name = "Bear Trap",    move1CD = 15.0, move2CD = 6.0,  missCD = 1.5 },
-	}
-	local THEME = {
-		Veil = Color3.fromRGB(0, 150, 255), Abysswalker = Color3.fromRGB(168, 85, 247), Butcher = Color3.fromRGB(239, 68, 68),
-		Cure = Color3.fromRGB(34, 197, 94), Masked = Color3.fromRGB(244, 63, 94), Slasher = Color3.fromRGB(249, 115, 22),
-		Stalker = Color3.fromRGB(148, 163, 184), Hidden = Color3.fromRGB(99, 102, 241), Killer = Color3.fromRGB(217, 119, 6),
-	}
-	local M1_ICON = "rbxassetid://123571635310131"
-	local RED, GREEN, AMBER = Color3.fromRGB(244, 63, 94), Color3.fromRGB(52, 230, 150), Color3.fromRGB(251, 191, 36)
-
-	local H = {
-		Gui = nil, Rows = {}, Conns = {}, RemoteConns = {}, Active = nil, Type = "Unknown", Moves = MOVES.Veil,
-		Att = { Until = 0, Total = 1.5 }, S1 = { Until = 0, Total = 10 }, S2 = { Until = 0, Total = 12 },
-		Action = { Text = "", Until = 0, Total = 0 }, Gen = 0, ToastUntil = 0,
+	local IGNORE = {
+		head = true, torso = true, humanoid = true, humanoidrootpart = true,
+		["left arm"] = true, ["right arm"] = true, ["left leg"] = true, ["right leg"] = true,
+		["left hand"] = true, ["right hand"] = true,
+		["upper torso"] = true, ["lower torso"] = true,
 	}
 
-	local function clear(list)
-		for _, c in ipairs(list) do pcall(function() c:Disconnect() end) end
-		table.clear(list)
+	-- "Perk Name 2" -> "Perk Name", "2"
+	local function parsePerk(nameStr)
+		local s = tostring(nameStr or "")
+		local base, lvl = s:match("^(.+)%s+(%d+)$")
+		if not base then return nil end
+		base = base:gsub("^%s+", ""):gsub("%s+$", "")
+		if base == "" or IGNORE[base:lower()] then return nil end
+		return base, lvl
 	end
 
-	-- ----- trigger -----
-	local function trig(slot, dur) slot.Until = os.clock() + dur; slot.Total = dur end
-	local function triggerAttack(d) trig(H.Att, d or 1.5) end
-	local function toast(skillName, dur)
-		if not H.Gui or not H.Toast then return end
-		local theme = THEME[H.Type] or Color3.fromRGB(168, 85, 247)
-		H.ToastText.Text = ("%s  \226\128\162  %s  \226\128\162  CD %.1fs"):format(string.upper(H.Moves.name or H.Type), skillName, dur)
-		H.ToastStroke.Color = theme
-		H.ToastIcon.ImageColor3 = theme
-		H.Toast.Visible = true
-		H.ToastUntil = os.clock() + 2.5
-	end
-	local function triggerSkill1(d)
-		local fresh = H.S1.Until < os.clock()
-		trig(H.S1, d or H.Moves.move1CD)
-		if fresh then toast(H.Moves.move1Name, H.S1.Total) end
-	end
-	local function triggerSkill2(d)
-		local fresh = H.S2.Until < os.clock()
-		trig(H.S2, d or H.Moves.move2CD)
-		if fresh then toast(H.Moves.move2Name, H.S2.Total) end
-	end
-	local function triggerSafe(text, d, col)
-		H.Action.Text = text; H.Action.Until = os.clock() + d; H.Action.Total = d; H.Action.Color = col or GREEN
-	end
-
-	-- ----- UI (gaya Kinon) -----
-	local function guiParent()
-		local ok, hui = pcall(function() return gethui and gethui() end)
-		if ok and typeof(hui) == "Instance" then return hui end
-		local core = game:GetService("CoreGui")
-		local okC = pcall(function() local t = Instance.new("Folder"); t.Parent = core; t:Destroy() end)
-		if okC then return core end
-		return LP:WaitForChild("PlayerGui")
-	end
-
-	local function makeRow(parent, order, iconImage)
-		local row = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = order }, parent)
-		local icon = new("ImageLabel", {
-			AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0), Size = UDim2.fromOffset(18, 18),
-			BackgroundTransparency = 1, Image = iconImage or "", ScaleType = Enum.ScaleType.Fit,
-		}, row)
-		corner(icon, 5)
-		local name = new("TextLabel", {
-			Position = UDim2.new(0, 32, 0, 0), Size = UDim2.new(1, -84, 1, 0), BackgroundTransparency = 1, Text = "-",
-			TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-		}, row)
-		local tm = new("TextLabel", {
-			AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 0), Size = UDim2.fromOffset(50, 26),
-			BackgroundTransparency = 1, Text = "READY", TextColor3 = GREEN, Font = Enum.Font.GothamBold, TextSize = 11,
-			TextXAlignment = Enum.TextXAlignment.Right,
-		}, row)
-		local barBg = new("Frame", {
-			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 32, 1, -1), Size = UDim2.new(1, -42, 0, 2),
-			BackgroundColor3 = C.Surface, BorderSizePixel = 0, Visible = false,
-		}, row)
-		corner(barBg, 2)
-		local bar = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = RED, BorderSizePixel = 0 }, barBg)
-		corner(bar, 2)
-		return { Row = row, Icon = icon, Name = name, Time = tm, BarBg = barBg, Bar = bar }
-	end
-	local function divider(parent, order)
-		new("Frame", { Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -16, 0, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9,
-			BorderSizePixel = 0 }, parent)
-	end
-	local function holder(parent, order, height)
-		-- pembungkus agar divider tidak melebar penuh
-		return new("Frame", { Size = UDim2.new(1, 0, 0, height), BackgroundTransparency = 1, LayoutOrder = order }, parent)
-	end
-
-	local function buildUI()
-		if H.Gui then return end
-		local gui = new("ScreenGui", { Name = "KinonKillerCD", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 997,
-			ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, guiParent())
-		H.Gui = gui
-
-		local frame = new("Frame", {
-			Name = "Panel", Size = UDim2.fromOffset(178, 0), AutomaticSize = Enum.AutomaticSize.Y,
-			Position = UDim2.new(0.02, 0, 0.38, 0), BackgroundColor3 = C.Card, BackgroundTransparency = 0.04,
-			BorderSizePixel = 0, Active = true,
-		}, gui)
-		corner(frame, 10)
-		new("UIStroke", { Color = WHITE, Transparency = 0.78, Thickness = 1 }, frame)
-		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, frame)
-		H.Frame = frame
-
-		-- notifikasi skill (atas layar)
-		local toastF = new("Frame", {
-			Name = "SkillToast", AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.09, 0),
-			Size = UDim2.fromOffset(0, 26), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = C.Card,
-			BackgroundTransparency = 0.05, BorderSizePixel = 0, Visible = false,
-		}, gui)
-		corner(toastF, 8)
-		H.ToastStroke = new("UIStroke", { Color = WHITE, Transparency = 0.2, Thickness = 1.2 }, toastF)
-		new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center,
-			SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6) }, toastF)
-		new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 10) }, toastF)
-		H.ToastIcon = new("ImageLabel", { Size = UDim2.fromOffset(14, 14), BackgroundTransparency = 1,
-			Image = "rbxassetid://10709798433", LayoutOrder = 1 }, toastF)
-		H.ToastText = new("TextLabel", { Size = UDim2.fromOffset(0, 26), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
-			Text = "", TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 11, LayoutOrder = 2 }, toastF)
-		H.Toast = toastF
-
-		-- judul
-		local head = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 1 }, frame)
-		new("TextLabel", { Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -68, 1, 0), BackgroundTransparency = 1,
-			Text = "Killer CD", TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left }, head)
-		H.Portrait = new("ImageLabel", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(22, 22),
-			BackgroundColor3 = C.Surface, BorderSizePixel = 0, Image = "rbxassetid://10709798433", ScaleType = Enum.ScaleType.Crop }, head)
-		corner(H.Portrait, 6)
-		H.MinBtn = new("TextButton", {
-			AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -36, 0.5, 0), Size = UDim2.fromOffset(20, 20),
-			BackgroundColor3 = C.Surface, BorderSizePixel = 0, Text = "\226\128\147", TextColor3 = C.Text,
-			Font = Enum.Font.GothamBold, TextSize = 14, AutoButtonColor = false,
-		}, head)
-		corner(H.MinBtn, 6)
-		H.PortraitStroke = new("UIStroke", { Color = WHITE, Transparency = 0.5, Thickness = 1.4 }, H.Portrait)
-
-		divider(holder(frame, 2, 1), 1)
-		-- baris killer
-		local killerRow = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = 3 }, frame)
-		H.KillerLbl = new("TextLabel", { Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(1, -56, 1, 0), BackgroundTransparency = 1,
-			Text = "Killer: -", TextColor3 = C.Muted, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd }, killerRow)
-		H.DistLbl = new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0), Size = UDim2.fromOffset(48, 24),
-			BackgroundTransparency = 1, Text = "--m", TextColor3 = GREEN, Font = Enum.Font.GothamBold, TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Right }, killerRow)
-		local d2 = holder(frame, 4, 1); divider(d2, 1)
-
-		H.Rows.Attack = makeRow(frame, 5, M1_ICON)
-		H.Rows.Attack.Name.Text = "Attack"
-		divider(holder(frame, 6, 1), 1)
-		H.Rows.S1 = makeRow(frame, 7)
-		divider(holder(frame, 8, 1), 1)
-		H.Rows.S2 = makeRow(frame, 9)
-		local d3 = holder(frame, 10, 1); divider(d3, 1)
-		H.Rows.Safe = makeRow(frame, 11, "rbxassetid://10709798433")
-		H.Rows.Safe.Row.Visible = false
-		d3.Visible = false
-		H.SafeDivider = d3
-
-		-- minimize
-		H.Min = false
-		H.MinBtn.MouseButton1Click:Connect(function()
-			H.Min = not H.Min
-			H.MinBtn.Text = H.Min and "+" or "\226\128\147"
-			for _, ch in ipairs(frame:GetChildren()) do
-				if ch:IsA("GuiObject") and ch.LayoutOrder >= 2 then ch.Visible = not H.Min end
-			end
-			if H.Min then
-				H.Rows.Safe.Row.Visible = false
-				H.SafeDivider.Visible = false
-			end
-		end)
-
-		-- geser
-		local dragging, dragStart, startPos
-		track(frame.InputBegan:Connect(function(inp)
-			if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-				dragging, dragStart, startPos = true, inp.Position, frame.Position
-				inp.Changed:Connect(function()
-					if inp.UserInputState == Enum.UserInputState.End then dragging = false end
-				end)
-			end
-		end))
-		track(UserInputService.InputChanged:Connect(function(inp)
-			if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
-				local d = inp.Position - dragStart
-				frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-			end
-		end))
-	end
-
-	-- ----- deteksi killer -----
-	local function isKillerChar(char)
-		if not char or not char:IsA("Model") or char == LP.Character then return false end
-		if not char:FindFirstChildOfClass("Humanoid") then return false end
-		local plr = Players:GetPlayerFromCharacter(char)
-		if plr == LP then return false end
-		if char:GetAttribute("Role") == "Killer" or char:GetAttribute("IsKiller") == true then return true end
-		if plr and plr.Team then
-			local t = string.lower(plr.Team.Name)
-			if t:find("killer") or t:find("slasher") then return true end
-		end
-		return false
-	end
 	local function findKiller()
-		for _, tag in ipairs(CollectionService:GetTagged("Killer")) do
-			local model = tag:IsA("Model") and tag or tag:FindFirstAncestorOfClass("Model")
-			if model and model ~= LP.Character and model:FindFirstChild("HumanoidRootPart") then return model end
-		end
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= LP and plr.Character and isKillerChar(plr.Character) then return plr.Character end
+		for _, p in ipairs(Players:GetPlayers()) do
+			local team = p.Team
+			if team and team.Name:lower():find("killer", 1, true) then return p end
 		end
 		return nil
 	end
-	local function resolveType(char)
-		local kName = char:GetAttribute("MorphedKiller") or char:GetAttribute("SelectedKiller")
-		local plr = Players:GetPlayerFromCharacter(char)
-		if not kName and plr then kName = plr:GetAttribute("SelectedKiller") or plr:GetAttribute("Killer") end
-		if not kName and MOVES[char.Name] then kName = char.Name end
-		if not kName then
-			for kn in pairs(MOVES) do
-				if string.find(string.lower(char.Name), string.lower(kn), 1, true) then kName = kn; break end
+
+	local function getPerks(player)
+		if not player then return {} end
+		local model = player.Character
+			or workspace:FindFirstChild(player.Name)
+			or workspace:FindFirstChild(player.DisplayName)
+		if not model then return {} end
+		local list, seen = {}, {}
+		for _, child in ipairs(model:GetChildren()) do
+			local perkName, lvl = parsePerk(child.Name)
+			if perkName and not seen[perkName] then
+				seen[perkName] = true
+				table.insert(list, { Name = perkName, Level = lvl })
 			end
 		end
-		if kName and not MOVES[kName] then kName = nil end
-		return kName or "Veil"
+		table.sort(list, function(a, b) return a.Name < b.Name end)
+		return list
 	end
 
-	local function bind(char)
-		if not char or char == H.Active then return end
-		H.Active = char
-		clear(H.Conns)
-		local kType = resolveType(char)
-		H.Type = kType
-		local moves = MOVES[kType] or MOVES.Veil
-		H.Moves = moves
-		local theme = THEME[kType] or Color3.fromRGB(168, 85, 247)
-		local plr = Players:GetPlayerFromCharacter(char)
-		H.S1.Total, H.S2.Total, H.Att.Total = moves.move1CD, moves.move2CD, moves.missCD
-		H.S1.Until, H.S2.Until, H.Att.Until = 0, 0, 0
-
-		if H.Gui then
-			H.KillerLbl.Text = "Killer: " .. (plr and (plr.DisplayName ~= "" and plr.DisplayName or plr.Name) or moves.name)
-			H.PortraitStroke.Color = theme
-			H.PortraitStroke.Transparency = 0
-			if plr and plr.UserId > 0 then
-				H.Portrait.Image = ("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"):format(plr.UserId)
-			end
-			H.Rows.S1.Icon.Image = moves.move1
-			H.Rows.S2.Icon.Image = moves.move2
-			H.Rows.S1.Name.Text = moves.move1Name
-			H.Rows.S2.Name.Text = moves.move2Name
-		end
-
-		-- layer 1: animasi
-		local hum = char:FindFirstChildOfClass("Humanoid")
-		local animator = hum and hum:FindFirstChildOfClass("Animator")
-		local function hookAnim(an)
-			table.insert(H.Conns, an.AnimationPlayed:Connect(function(track)
-				local aId = (track.Animation and track.Animation.AnimationId) or ""
-				local tName = string.lower(track.Name or "")
-				local m1Id = moves.move1:match("%d+")
-				local m2Id = moves.move2:match("%d+")
-				if (m1Id and aId:find(m1Id, 1, true)) or tName:find("flask") or tName:find("spear")
-					or tName:find("chain") or tName:find("wave") then
-					triggerSkill1(moves.move1CD)
-				elseif (m2Id and aId:find(m2Id, 1, true)) or tName:find("gas") or tName:find("inject")
-					or tName:find("trap") or tName:find("leap") or tName:find("frenzy")
-					or tName:find("stalk") or tName:find("reload") then
-					triggerSkill2(moves.move2CD)
-				elseif tName:find("attack") or tName:find("swing") or tName:find("lunge")
-					or tName:find("slash") or aId:find("113691709436161", 1, true) then
-					triggerAttack(moves.missCD)
-				elseif track.Priority == Enum.AnimationPriority.Action or track.Priority == Enum.AnimationPriority.Action2
-					or track.Priority == Enum.AnimationPriority.Action3 or track.Priority == Enum.AnimationPriority.Action4 then
-					triggerAttack(moves.missCD)
-				end
-			end))
-		end
-		if animator then hookAnim(animator)
-		else
-			table.insert(H.Conns, char.DescendantAdded:Connect(function(d) if d:IsA("Animator") then hookAnim(d) end end))
-		end
-
-		-- layer 3: attribute
-		table.insert(H.Conns, char.AttributeChanged:Connect(function(attr)
-			local v = char:GetAttribute(attr)
-			if (attr == "isBreakingPallet" or attr == "isBreaking") and v == true then
-				triggerSafe("Breaking Pallet", 2.16, GREEN)
-			elseif attr == "isBreakingGen" and v == true then
-				triggerSafe("Kicking Generator", 1.90, AMBER)
-			elseif attr == "isVaulting" and v == true then
-				triggerSafe("Vaulting Window", 1.525, Color3.fromRGB(6, 182, 212))
-			elseif (attr == "IsStunned" or attr == "isTrueStunned") and v == true then
-				triggerSafe("Pallet Stunned", 3.00, RED)
-			elseif attr == "isAttacking" or attr == "isLunging" then
-				if v == true then triggerAttack(moves.missCD) end
-			elseif attr == "ChainMove1CD" then
-				if type(v) == "number" and v > 0 then triggerSkill1(math.max(v, 15)) end
-			elseif attr == "PlacingTrap" and v == true then
-				triggerSkill2(6.0)
-			end
-		end))
-
-		-- layer 5: weapon trail
-		local function hookWeapon(wep)
-			if not wep then return end
-			for _, desc in ipairs(wep:GetDescendants()) do
-				if desc:IsA("Trail") and desc:GetAttribute("SwingTrail") then
-					table.insert(H.Conns, desc:GetPropertyChangedSignal("Enabled"):Connect(function()
-						if desc.Enabled then triggerAttack(moves.missCD) end
-					end))
+	local function snapshot()
+		local killer = findKiller()
+		local name = killer and (killer.DisplayName or killer.Name) or "Unknown"
+		local perks = getPerks(killer)
+		if #perks == 0 then
+			for _, p in ipairs(Players:GetPlayers()) do
+				local list = getPerks(p)
+				if #list > 0 then
+					name = p.DisplayName or p.Name
+					perks = list
+					break
 				end
 			end
 		end
-		hookWeapon(char:FindFirstChild("Weapon"))
-		table.insert(H.Conns, char.ChildAdded:Connect(function(c) if c.Name == "Weapon" then hookWeapon(c) end end))
-
-		-- layer 4: projectile
-		table.insert(H.Conns, workspace.ChildAdded:Connect(function(c)
-			local n = string.lower(c.Name)
-			if n:find("flask") then triggerSkill1(moves.move1CD)
-			elseif n:find("spear") then triggerSkill1(moves.move1CD)
-			elseif n:find("wave") then triggerSkill1(moves.move1CD) end
-		end))
+		return name, perks
 	end
 
-	-- layer 2: remote global
-	local function hookRemotes()
-		local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-		if not Remotes then return end
-		local function attach(rem, handler)
-			if rem and rem:IsA("RemoteEvent") then table.insert(H.RemoteConns, rem.OnClientEvent:Connect(handler)) end
+	-- Ukuran dihitung manual supaya panel pasti tampil.
+	local function resize()
+		if not ui.panel or not ui.rows or not ui.body then return end
+		local rows = math.max(ui.rowCount or 1, 1)
+		local rowsH = rows * ROW_H + (rows - 1) * 2
+		ui.rows.Size = UDim2.new(1, 0, 0, rowsH)
+		local bodyH = 8 + 20 + 6 + 1 + 6 + rowsH + 10
+		ui.body.Size = UDim2.new(1, 0, 0, bodyH)
+		ui.panel.Size = UDim2.fromOffset(WIDTH, HEADER_H + (minimized and 0 or bodyH))
+	end
+
+	local function clearRows()
+		if not ui.rows then return end
+		for _, child in ipairs(ui.rows:GetChildren()) do
+			if not child:IsA("UIListLayout") then child:Destroy() end
 		end
-		local killers = Remotes:FindFirstChild("Killers")
-		if killers then
-			local cure = killers:FindFirstChild("Cure")
-			attach(cure and cure:FindFirstChild("VisualizeFlask"), function() triggerSkill1(10.0) end)
-			local veil = killers:FindFirstChild("Veil")
-			attach(veil and veil:FindFirstChild("SpearState"), function(state)
-				if state == "launch" or not state then triggerSkill1(8.0) end
-			end)
-			local b = killers:FindFirstChild("Butcher")
-			attach(b and b:FindFirstChild("ChainThrow"), function() triggerSkill1(15.0) end)
-			local a = killers:FindFirstChild("Abysswalker")
-			attach(a and a:FindFirstChild("visualize"), function() triggerSkill1(8.0) end)
+	end
+
+	local function addRow(order, text, level)
+		local row = make("Frame", {
+			LayoutOrder = order,
+			Size = UDim2.new(1, 0, 0, ROW_H),
+			BackgroundTransparency = 1,
+		}, ui.rows)
+		if not level then
+			make("TextLabel", {
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
+				Font = Enum.Font.Gotham,
+				Text = text,
+				TextColor3 = Theme.Muted,
+				TextSize = 10,
+				TextXAlignment = Enum.TextXAlignment.Left,
+			}, row)
+			return
 		end
-		local atks = Remotes:FindFirstChild("Attacks")
-		if atks then
-			for _, nm in ipairs({ "BasicAttack", "Lunge", "LungeDetect", "AfterAttack", "AttackLock" }) do
-				attach(atks:FindFirstChild(nm), function() triggerAttack(1.5) end)
+		local dot = make("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 2, 0.5, 0),
+			Size = UDim2.fromOffset(4, 4),
+			BackgroundColor3 = Theme.Text,
+			BorderSizePixel = 0,
+		}, row)
+		corner(dot, 2)
+		local pill = make("Frame", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, 0, 0.5, 0),
+			Size = UDim2.fromOffset(34, 16),
+			BackgroundColor3 = Theme.Panel3,
+			BorderSizePixel = 0,
+		}, row)
+		corner(pill, 5)
+		make("TextLabel", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = "LV " .. tostring(level),
+			TextColor3 = Theme.Muted,
+			TextSize = 8,
+		}, pill)
+		make("TextLabel", {
+			Position = UDim2.fromOffset(14, 0),
+			Size = UDim2.new(1, -54, 1, 0),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Gotham,
+			Text = text,
+			TextColor3 = Theme.Label,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, row)
+	end
+
+	function KP.Refresh()
+		if not KP.Enabled or not ui.rows then return end
+		local name, perks = snapshot()
+		local parts = { name }
+		for i = 1, math.min(#perks, MAX_PERKS) do
+			parts[#parts + 1] = perks[i].Name .. "#" .. tostring(perks[i].Level)
+		end
+		local sig = table.concat(parts, "|")
+		if sig == signature then return end
+		signature = sig
+
+		ui.name.Text = name
+		clearRows()
+		if #perks == 0 then
+			ui.rowCount = 1
+			addRow(1, "Waiting for perk data...", nil)
+		else
+			ui.rowCount = math.min(#perks, MAX_PERKS)
+			for i = 1, ui.rowCount do
+				addRow(i, perks[i].Name, perks[i].Level or "?")
 			end
 		end
+		resize()
 	end
 
-	-- ----- render -----
-	local function paintRow(r, rem, total)
-		if rem > 0 then
-			r.Time.Text = ("%.1fs"):format(rem)
-			r.Time.TextColor3 = RED
-			r.BarBg.Visible = true
-			r.Bar.Size = UDim2.fromScale(math.clamp(rem / math.max(0.01, total), 0, 1), 1)
-			r.Icon.ImageTransparency = 0.5
-		else
-			r.Time.Text = "READY"
-			r.Time.TextColor3 = GREEN
-			r.BarBg.Visible = false
-			r.Icon.ImageTransparency = 0
+	local function setMinimized(value)
+		minimized = value
+		if ui.body then ui.body.Visible = not value end
+		if ui.minHolder then
+			for _, child in ipairs(ui.minHolder:GetChildren()) do child:Destroy() end
+			icon(ui.minHolder, value and "plus" or "minus", 12, Theme.Text)
 		end
+		resize()
 	end
-	local acc = 0
-	local function render(dt)
-		if unloaded or not K.Enabled or not H.Gui then return end
-		acc = acc + dt
-		if acc < 0.05 then return end
-		acc = 0
-		if not H.Active or not H.Active.Parent then
-			H.Active = nil
-			local k = findKiller()
-			if k then bind(k) else H.KillerLbl.Text = "Killer: -"; H.DistLbl.Text = "--m" end
-		end
-		local now = os.clock()
-		if H.Toast and H.Toast.Visible and now > H.ToastUntil then H.Toast.Visible = false end
-		local root = H.Active and H.Active:FindFirstChild("HumanoidRootPart")
-		local mine = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-		if root and mine then
-			local dist = (root.Position - mine.Position).Magnitude
-			H.DistLbl.Text = ("%dm"):format(math.floor(dist))
-			H.DistLbl.TextColor3 = dist < 25 and RED or (dist < 50 and AMBER or GREEN)
-		end
-		paintRow(H.Rows.Attack, H.Att.Until - now, H.Att.Total)
-		paintRow(H.Rows.S1, H.S1.Until - now, H.S1.Total)
-		paintRow(H.Rows.S2, H.S2.Until - now, H.S2.Total)
-		local remAct = H.Action.Until - now
-		local safe = H.Rows.Safe
-		if H.Min then
-			safe.Row.Visible = false
-			H.SafeDivider.Visible = false
-		elseif remAct > 0 then
-			safe.Row.Visible = true
-			H.SafeDivider.Visible = true
-			safe.Name.Text = H.Action.Text
-			safe.Time.Text = ("%.1fs"):format(remAct)
-			safe.Time.TextColor3 = H.Action.Color or GREEN
-			safe.BarBg.Visible = true
-			safe.Bar.BackgroundColor3 = H.Action.Color or GREEN
-			safe.Bar.Size = UDim2.fromScale(math.clamp(remAct / math.max(0.01, H.Action.Total), 0, 1), 1)
+
+	local function clampPosition(x, y)
+		local screen = ui.screen and ui.screen.AbsoluteSize or Vector2.new(800, 600)
+		local size = ui.panel and ui.panel.AbsoluteSize or Vector2.new(WIDTH, HEADER_H)
+		return math.clamp(x, 0, math.max(screen.X - size.X, 0)), math.clamp(y, 0, math.max(screen.Y - size.Y, 0))
+	end
+
+	function KP.Stop()
+		KP.Enabled = false
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		table.clear(conns)
+		if KP.Gui then pcall(function() KP.Gui:Destroy() end) end
+		KP.Gui = nil
+		ui = {}
+		signature = nil
+	end
+
+	local function build()
+		local gui = make("ScreenGui", {
+			Name = "KinonKillerPerks",
+			ResetOnSpawn = false,
+			IgnoreGuiInset = true,
+			DisplayOrder = 1001, -- di atas window hub
+			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		}, UIParent)
+		if gui.Parent == nil then gui.Parent = LP:WaitForChild("PlayerGui") end
+		KP.Gui = gui
+		ui.screen = gui
+
+		local panel = make("Frame", {
+			Name = "Panel",
+			Position = position,
+			Size = UDim2.fromOffset(WIDTH, HEADER_H + 80),
+			BackgroundColor3 = Theme.Background,
+			BackgroundTransparency = 0.05,
+			BorderSizePixel = 0,
+		}, gui)
+		corner(panel, 12)
+		stroke(panel, Color3.fromRGB(120, 120, 120), 1, 0.25)
+		ui.panel = panel
+
+		-- header (drag handle) + minimize button, top right
+		local header = make("Frame", {
+			Size = UDim2.new(1, 0, 0, HEADER_H),
+			BackgroundColor3 = Theme.Panel,
+			BorderSizePixel = 0,
+		}, panel)
+		corner(header, 12)
+		make("Frame", {
+			Position = UDim2.new(0, 0, 1, -12),
+			Size = UDim2.new(1, 0, 0, 12),
+			BackgroundColor3 = Theme.Panel,
+			BorderSizePixel = 0,
+		}, header)
+		make("Frame", {
+			Position = UDim2.new(0, 0, 1, -1),
+			Size = UDim2.new(1, 0, 0, 1),
+			BackgroundColor3 = Theme.Stroke,
+			BackgroundTransparency = 0.45,
+			BorderSizePixel = 0,
+		}, header)
+
+		local headIcon = make("Frame", {
+			Position = UDim2.fromOffset(8, 7),
+			Size = UDim2.fromOffset(16, 16),
+			BackgroundTransparency = 1,
+		}, header)
+		icon(headIcon, "list-checks", 14, Theme.Text)
+		make("TextLabel", {
+			Position = UDim2.fromOffset(30, 0),
+			Size = UDim2.new(1, -66, 1, 0),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = "KILLER PERKS",
+			TextColor3 = Theme.Text,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, header)
+
+		local minBtn = make("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -6, 0.5, 0),
+			Size = UDim2.fromOffset(22, 22),
+			BackgroundColor3 = Theme.Panel3,
+			BorderSizePixel = 0,
+			Text = "",
+			AutoButtonColor = false,
+		}, header)
+		corner(minBtn, 7)
+		stroke(minBtn, Theme.Stroke, 1, 0.4)
+		ui.minHolder = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, minBtn)
+		table.insert(conns, minBtn.MouseEnter:Connect(function()
+			tween(minBtn, 0.1, { BackgroundColor3 = Theme.Panel4 })
+		end))
+		table.insert(conns, minBtn.MouseLeave:Connect(function()
+			tween(minBtn, 0.1, { BackgroundColor3 = Theme.Panel3 })
+		end))
+		table.insert(conns, minBtn.MouseButton1Click:Connect(function()
+			setMinimized(not minimized)
+		end))
+
+		-- body
+		local body = make("Frame", {
+			Position = UDim2.fromOffset(0, HEADER_H),
+			Size = UDim2.new(1, 0, 0, 60),
+			BackgroundTransparency = 1,
+		}, panel)
+		padding(body, 10, 10, 8, 10)
+		make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+		ui.body = body
+
+		local nameRow = make("Frame", {
+			LayoutOrder = 1,
+			Size = UDim2.new(1, 0, 0, 20),
+			BackgroundTransparency = 1,
+		}, body)
+		local nameIcon = make("Frame", {
+			Size = UDim2.fromOffset(20, 20),
+			BackgroundColor3 = Theme.Panel3,
+			BorderSizePixel = 0,
+		}, nameRow)
+		corner(nameIcon, 6)
+		icon(nameIcon, "skull", 12, Theme.Text)
+		ui.name = make("TextLabel", {
+			Position = UDim2.fromOffset(28, 0),
+			Size = UDim2.new(1, -28, 1, 0),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = "Unknown",
+			TextColor3 = Theme.Text,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, nameRow)
+
+		make("Frame", {
+			LayoutOrder = 2,
+			Size = UDim2.new(1, 0, 0, 1),
+			BackgroundColor3 = Theme.Stroke,
+			BackgroundTransparency = 0.5,
+			BorderSizePixel = 0,
+		}, body)
+
+		ui.rows = make("Frame", {
+			LayoutOrder = 3,
+			Size = UDim2.new(1, 0, 0, ROW_H),
+			BackgroundTransparency = 1,
+		}, body)
+		make("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, ui.rows)
+
+		setMinimized(minimized)
+
+		-- drag by header (mouse + touch)
+		local dragging, dragInput, dragStart, startX, startY = false, nil, nil, 0, 0
+		table.insert(conns, header.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragInput = input
+				dragStart = Vector2.new(input.Position.X, input.Position.Y)
+				startX, startY = panel.Position.X.Offset, panel.Position.Y.Offset
+			end
+		end))
+		table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+			if not dragging then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement
+				and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			if input.UserInputType == Enum.UserInputType.Touch and input ~= dragInput then return end
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+			local x, y = clampPosition(startX + delta.X, startY + delta.Y)
+			position = UDim2.fromOffset(x, y)
+			panel.Position = position
+		end))
+		table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end))
+
+		KP.Refresh()
+		task.spawn(function()
+			while KP.Enabled and KP.Gui == gui and not unloaded do
+				task.wait(1)
+				if KP.Enabled and KP.Gui == gui then pcall(KP.Refresh) end
+			end
+		end)
+	end
+
+	function KP.Start()
+		if KP.Enabled then return end
+		KP.Stop()
+		KP.Enabled = true
+		local ok, err = pcall(build)
+		if not ok then
+			warn("[Kinon] Killer Perks Display gagal dibuat: " .. tostring(err))
+			KP.Stop()
 		else
-			safe.Row.Visible = false
-			H.SafeDivider.Visible = false
+			print("[Kinon] Killer Perks Display aktif")
 		end
 	end
 
-	local stepConn, watchdogGen = nil, 0
-	function K.SetEnabled(on)
-		K.Enabled = on == true
-		if K.Enabled and not unloaded then
-			if stepConn then stepConn:Disconnect() end
-			buildUI()
-			hookRemotes()
-			local k = findKiller()
-			if k then bind(k) end
-			stepConn = RunService.RenderStepped:Connect(render)
-			pcall(function()
-				table.insert(H.RemoteConns, CollectionService:GetInstanceAddedSignal("Killer"):Connect(function(inst)
-					local model = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
-					if model then bind(model) end
-				end))
-			end)
-		else
-			K.Destroy()
-		end
-	end
-	function K.Destroy()
-		K.Enabled = false
-		if stepConn then stepConn:Disconnect(); stepConn = nil end
-		clear(H.Conns)
-		clear(H.RemoteConns)
-		if H.Gui then pcall(function() H.Gui:Destroy() end) end
-		H.Gui, H.Frame, H.Active = nil, nil, nil
-		table.clear(H.Rows)
-	end
-
-	return K
+	return KP
 end)()
 
+-- ================== Killer Skill Cooldown (HUD) ==================
 do
 	local s = State.ESPPlayer
 	local esp = State.PlayerESPObj
@@ -11334,9 +11480,11 @@ end)()
 		function(v)
 			if v then State.SpectatorCounter.Start() else State.SpectatorCounter.Stop() end
 		end)
-	addCheckbox(card, "Killer Skill Cooldown [Beta]", "timer",
-		function() return State.KillerCD.Enabled end,
-		function(v) State.KillerCD.SetEnabled(v) end)
+	addCheckbox(card, "Killer Perks Display", "list-checks",
+		function() return State.KillerPerks.Enabled end,
+		function(v)
+			if v then State.KillerPerks.Start() else State.KillerPerks.Stop() end
+		end)
 	addCheckbox(card, "Streamer Mode", "video-off",
 		function() return State.StreamerMode.Enabled end,
 		function(v) State.StreamerMode.SetEnabled(v) end)
@@ -11377,6 +11525,7 @@ State.Utilities = {
 	AutoDodgeAbyssS = false,
 	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13,
 	FastBreakPalletK = false, PalletBreakMult = 5,
+	AutoStalkK = false, AutoStalkRange = 150,
 	SelfHealS = false, SelfHealAllS = false, HealThreshold = 90,
 	DashRadius = 50, AimRadius = 50,
 }
@@ -11389,7 +11538,7 @@ State.UtilGroup = {
 	PalletReflexS = "UtilitiesS", AlwaysFastVaultS = "UtilitiesS",
 	UnlimitedVaultS = "UtilitiesS", AutoDodgeAbyssS = "UtilitiesS",
 	VaultSpeedS = "UtilitiesS", FlowstateS = "UtilitiesS",
-	FastBreakPalletK = "UtilitiesK",
+	FastBreakPalletK = "UtilitiesK", AutoStalkK = "UtilitiesK",
 	SelfHealS = "UtilitiesS", SelfHealAllS = "UtilitiesS",
 }
 local function applyUtilities()
@@ -11761,9 +11910,48 @@ do
 	do
 		local breakConn
 		local origAttrs = {}
-		local BREAK_ATTRS = { "breakspeed", "PalletBreakSpeed", "InteractSpeed", "ActionSpeed" }
+		-- Hanya atribut khusus pallet. InteractSpeed/ActionSpeed dihapus karena dipakai
+		-- juga oleh aksi lain (hancurkan generator, hook, dll).
+		local BREAK_ATTRS = { "breakspeed", "PalletBreakSpeed" }
+		local BREAK_ACTIONS = { Breaking = true, PalletBreak = true, Palletwrong = true }
+		local PALLET_RANGE = 14
+		local palletCache, palletCacheAt = {}, 0
+
+		local function palletPosition(obj)
+			if obj:IsA("Model") then
+				local ok, cf = pcall(obj.GetPivot, obj)
+				return ok and cf.Position or nil
+			elseif obj:IsA("BasePart") then
+				return obj.Position
+			end
+		end
+
+		-- True hanya kalau killer berada dekat pallet. Daftar pallet di-cache beberapa detik
+		-- dan baru dicari saat aksi "breaking" terdeteksi, jadi tidak membebani tiap frame.
+		local function nearPallet(root)
+			local now = os.clock()
+			if now - palletCacheAt > 4 then
+				palletCacheAt = now
+				table.clear(palletCache)
+				for _, d in ipairs(workspace:GetDescendants()) do
+					if d.Name == "Pallet" or d.Name == "Palletwrong" then
+						if d:IsA("Model") or d:IsA("BasePart") then table.insert(palletCache, d) end
+					elseif d.Name == "PrimaryPartPallet" and d:IsA("BasePart") and d.Parent then
+						table.insert(palletCache, d.Parent)
+					end
+				end
+			end
+			for _, pallet in ipairs(palletCache) do
+				if pallet.Parent then
+					local pos = palletPosition(pallet)
+					if pos and (pos - root.Position).Magnitude <= PALLET_RANGE then return true end
+				end
+			end
+			return false
+		end
 
 		local function restoreAttrs()
+			if next(origAttrs) == nil then return end
 			local char = LP.Character
 			if char then
 				for _, name in ipairs(BREAK_ATTRS) do
@@ -11789,18 +11977,21 @@ do
 					or (LP.Team and string.find(string.lower(LP.Team.Name), "killer", 1, true))
 				if not isKiller then return end
 
-				local mult = math.clamp(tonumber(U.PalletBreakMult) or 5, 1, 10)
-				local immobile = char:GetAttribute("Immobile") or char:GetAttribute("immobile")
+				-- Hanya saat aksi memecah pallet. Status Immobile umum tidak dipakai lagi karena
+				-- juga aktif saat menghancurkan generator, menge-hook, mengangkat survivor, dll.
 				local breaking = false
 				local ci = char:FindFirstChild("CheckInterractable")
 				if ci then
 					local action = ci:GetAttribute("action") or ci:GetAttribute("Action")
-					if action == "Breaking" or action == "PalletBreak" or action == "Palletwrong" then
-						breaking = true
-					end
+					breaking = BREAK_ACTIONS[action] == true
 				end
-				if not (immobile or breaking) then return end
+				local root = char:FindFirstChild("HumanoidRootPart")
+				if not (breaking and root and nearPallet(root)) then
+					restoreAttrs() -- aksi lain: kembalikan nilai asli segera
+					return
+				end
 
+				local mult = math.clamp(tonumber(U.PalletBreakMult) or 5, 1, 10)
 				pcall(function()
 					for _, name in ipairs(BREAK_ATTRS) do
 						if origAttrs[name] == nil then
@@ -12232,8 +12423,13 @@ do
 		end)
 	end
 
-	local HEAL_RANGE = 14
-	local HEAL_MAX = 6
+	local HEAL_RANGE = 20
+	local REFIRE = 0.15
+
+	local function isMoving(char)
+		local h = char and char:FindFirstChildOfClass("Humanoid")
+		return h ~= nil and h.MoveDirection.Magnitude > 0.1
+	end
 
 	State.UtilityHandlers.SelfHealS = function(on)
 		if selfConn then selfConn:Disconnect(); selfConn = nil end
@@ -12254,81 +12450,125 @@ do
 			local h = c and c:FindFirstChildOfClass("Humanoid")
 			stopHealAnim(h and h:FindFirstChildOfClass("Animator"))
 		end)
-		local mode, startAt, coolUntil = "idle", 0, 0
+		local healing, last = false, 0
 		selfConn = RunService.Heartbeat:Connect(function()
 			local c = LP.Character
 			local h = c and c:FindFirstChildOfClass("Humanoid")
-			if not h or h.Health <= 0 then mode = "idle" return end
+			if not h or h.Health <= 0 then healing = false return end
 			local now = os.clock()
-			local low = h.Health < h.MaxHealth * threshold()
-			if mode == "healing" then
-				local ci = c:FindFirstChild("CheckInterractable")
-				local active = ci and ci:GetAttribute("isHealing")
-				if not low or now - startAt > HEAL_MAX or (not active and now - startAt > 0.6) then
+			if h.Health >= h.MaxHealth * threshold() or isMoving(c) then
+				if healing then
+					healing = false
 					fireHeal(c, false)
-					mode = "cool"
-					coolUntil = now + (low and 1.5 or 0.3)
 				end
-			elseif mode == "cool" then
-				if now >= coolUntil then mode = "idle" end
-			elseif low then
+				return
+			end
+			if healing and now - last > REFIRE then
+				local ci = c:FindFirstChild("CheckInterractable")
+				if ci and not ci:GetAttribute("isHealing") then healing = false end
+			end
+			if not healing and now - last >= REFIRE then
+				healing = true
+				last = now
 				fireHeal(c, true)
-				mode = "healing"
-				startAt = now
 			end
 		end)
 	end
 
 	State.UtilityHandlers.SelfHealAllS = function(on)
 		if allConn then allConn:Disconnect(); allConn = nil end
-		if allMap then
-			for plr, rec in pairs(allMap) do
-				if rec.mode == "healing" and plr.Character then fireHeal(plr.Character, false) end
-			end
+		if allMap and allMap.target and allMap.healing then
+			fireHeal(allMap.target, false)
 		end
 		allMap = {}
 		if not on then return end
-		local map = allMap
+		local st = allMap
 		allConn = RunService.Heartbeat:Connect(function()
 			local myChar = LP.Character
 			local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-			if not myRoot then return end
-			local now = os.clock()
-			local busyTarget = false
-			for _, rec in pairs(map) do
-				if rec.mode == "healing" then busyTarget = true end
+			if not myRoot or isMoving(myChar) then
+				if st.target and st.healing then
+					fireHeal(st.target, false)
+					st.healing = false
+				end
+				return
 			end
+			local now = os.clock()
+			local best, bestDist
 			for _, plr in ipairs(Players:GetPlayers()) do
 				if plr ~= LP then
 					local ch = plr.Character
 					local hu = ch and ch:FindFirstChildOfClass("Humanoid")
 					local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-					local injured = hu and hrp and hu.Health > 0 and hu.Health < hu.MaxHealth - 0.01
+					if hu and hrp and hu.Health > 0 and hu.Health < hu.MaxHealth - 0.01
 						and ch:GetAttribute("IsHooked") ~= true
 						and ch:GetAttribute("IsCarried") ~= true
-						and ch:GetAttribute("Knocked") ~= true
-					local near = injured and (hrp.Position - myRoot.Position).Magnitude <= HEAL_RANGE
-					local rec = map[plr]
-					if rec and rec.mode == "healing" then
-						local ci = myChar:FindFirstChild("CheckInterractable")
-						local active = ci and ci:GetAttribute("isHealing")
-						if not near or now - rec.startAt > HEAL_MAX or (not active and now - rec.startAt > 0.6) then
-							if ch then fireHeal(ch, false) end
-							rec.mode = "cool"
-							rec.coolUntil = now + (near and 1.5 or 0.3)
-							busyTarget = false
+						and ch:GetAttribute("Knocked") ~= true then
+						local dist = (hrp.Position - myRoot.Position).Magnitude
+						if dist <= HEAL_RANGE and (not bestDist or dist < bestDist) then
+							best, bestDist = ch, dist
 						end
-					elseif rec and rec.mode == "cool" then
-						if now >= rec.coolUntil then map[plr] = nil end
-					elseif near and not busyTarget then
-						fireHeal(ch, true)
-						map[plr] = { mode = "healing", startAt = now }
-						busyTarget = true
 					end
-				elseif map[plr] then
-					map[plr] = nil
 				end
 			end
+			if st.target and st.target ~= best and st.healing then
+				fireHeal(st.target, false)
+				st.healing = false
+			end
+			st.target = best
+			if not best then return end
+			if st.healing and now - st.last > REFIRE then
+				local ci = myChar:FindFirstChild("CheckInterractable")
+				if ci and not ci:GetAttribute("isHealing") then st.healing = false end
+			end
+			if not st.healing and now - (st.last or 0) >= REFIRE then
+				st.healing = true
+				st.last = now
+				fireHeal(best, true)
+			end
+		end)
+	end
+end
+
+do
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local stalkConn
+	local function stalkRemote()
+		local r = ReplicatedStorage:FindFirstChild("Remotes")
+		local k = r and r:FindFirstChild("Killers")
+		local st = k and k:FindFirstChild("Stalker")
+		return st and st:FindFirstChild("StartStalking")
+	end
+	local function closestSurvivor(range)
+		local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+		if not root then return nil end
+		local best, bestDist = nil, range
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LP and plr.Character and plr.Team and string.find(string.lower(plr.Team.Name), "survivor", 1, true) then
+				local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+				local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+				if hum and hrp and hum.Health > 30 then
+					local dist = (hrp.Position - root.Position).Magnitude
+					if dist <= bestDist then best, bestDist = plr, dist end
+				end
+			end
+		end
+		return best
+	end
+	State.UtilityHandlers.AutoStalkK = function(on)
+		if stalkConn then stalkConn:Disconnect(); stalkConn = nil end
+		if not on then return end
+		local last = 0
+		stalkConn = RunService.Heartbeat:Connect(function()
+			local now = os.clock()
+			if now - last < 0.3 then return end
+			last = now
+			if not State.IsKillerNow() then return end
+			local range = math.clamp(tonumber(State.Utilities.AutoStalkRange) or 150, 20, 500)
+			local target = closestSurvivor(range)
+			if not target then return end
+			local remote = stalkRemote()
+			if remote then pcall(function() remote:FireServer(target) end) end
 		end)
 	end
 end
@@ -12369,6 +12609,10 @@ do
 	util(kill, "Anti Blind Flashlight", "flashlight-off", "AntiBlindFlashlightK")
 	util(kill, "Dash Lock", "lock", "DashLockK")
 	util(kill, "Aimlock Attack", "crosshair", "AimlockAttackK")
+	util(kill, "Auto Stalk (Myers)", "eye", "AutoStalkK")
+	addSlider(kill, "Auto Stalk Range", "ruler", 20, 500,
+		function() return math.clamp(math.floor(tonumber(s.AutoStalkRange) or 150), 20, 500) end,
+		function(v) s.AutoStalkRange = v end)
 	util(kill, "Fast Break Pallet", "zap", "FastBreakPalletK")
 	addSlider(kill, "Fast Break Pallet Speed", "gauge", 1, 10,
 		function() return math.clamp(math.floor(tonumber(s.PalletBreakMult) or 5), 1, 10) end,
@@ -13690,7 +13934,7 @@ local function unload()
 	pcall(function() State.SilentObj:Destroy() end)
 	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.SpectatorCounter.Stop() end)
-	pcall(function() State.KillerCD.Destroy() end)
+	pcall(function() State.KillerPerks.Stop() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
