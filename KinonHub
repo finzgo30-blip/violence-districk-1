@@ -31,7 +31,7 @@ local Parry = {
 	Range = 14,
 	ReachBonus = 2,
 	FaceSensitivity = 10,
-	AggressiveMode = false,
+	AggressiveMode = true,
 	Distance = 15,
 	FaceBias = 10,
 	CircleVisible = false,
@@ -43,7 +43,7 @@ local ParryV2 = {
 	Range = 14,
 	ReachBonus = 2,
 	FaceSensitivity = 10,
-	AggressiveMode = false,
+	AggressiveMode = true,
 	CircleVisible = false,
 	RangeColor = Color3.fromRGB(100, 200, 255),
 }
@@ -3826,6 +3826,68 @@ State.SkillCheckObj = (function()
 		NormalMinOffset = 116, NormalMaxOffset = 140,
 	}
 
+	-- Instant mode spoof: a metamethod hook on game's __index makes any read
+	-- of Line.Rotation return our forced value, instead of just writing the
+	-- property once and hoping nothing re-reads/re-asserts it before the
+	-- input lands. ActiveLine/ActiveTargetRot are upvalues (not fields on an
+	-- instance) because the hook callback has no "self" to look them up on;
+	-- there is only ever one SkillCheckObj instance anyway.
+	local ActiveLine, ActiveTargetRot = nil, nil
+	local rotationHookInstalled = false
+	pcall(function()
+		if hookmetamethod and not rotationHookInstalled then
+			local origIndex
+			origIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+				if key == "Rotation" and ActiveLine and self == ActiveLine and ActiveTargetRot and not (checkcaller and checkcaller()) then
+					return ActiveTargetRot
+				end
+				return origIndex(self, key)
+			end))
+			rotationHookInstalled = true
+		end
+	end)
+
+	local function getPingSeconds()
+		local ping = 0.06
+		pcall(function()
+			local p = LP:GetNetworkPing()
+			if type(p) == "number" and p > 0 then ping = p end
+		end)
+		return ping
+	end
+
+	local genCache, genCacheAt = {}, 0
+	local function nearestGeneratorProgress()
+		local char = LP.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return nil end
+		if os.clock() - genCacheAt > 4 then
+			genCacheAt = os.clock()
+			genCache = {}
+			pcall(function()
+				for _, d in ipairs(workspace:GetDescendants()) do
+					if d:IsA("Model") and string.lower(d.Name) == "generator" and d:GetAttribute("RepairProgress") ~= nil then
+						genCache[#genCache + 1] = d
+					end
+				end
+			end)
+		end
+		local best, bestDist
+		for _, g in ipairs(genCache) do
+			if g.Parent then
+				local ok, pivot = pcall(function() return g:GetPivot().Position end)
+				if ok and pivot then
+					local dist = (pivot - root.Position).Magnitude
+					if dist <= 25 and (not bestDist or dist < bestDist) then
+						best, bestDist = g, dist
+					end
+				end
+			end
+		end
+		if not best then return nil end
+		return tonumber(best:GetAttribute("RepairProgress"))
+	end
+
 	local Class = {}
 	Class.__index = Class
 
@@ -3955,7 +4017,7 @@ State.SkillCheckObj = (function()
 
 	function Class:_shouldFireByRange(lineRot, goalRot)
 		local S = self.Settings
-		local m = S.Mode
+		local m = self._effMode or S.Mode
 		if m == "Normal" then
 			return self:_inAngleRange(lineRot, goalRot, S.NormalMinOffset, S.NormalMaxOffset)
 		end
@@ -3981,21 +4043,66 @@ State.SkillCheckObj = (function()
 		if not line then return end
 
 		local mode = self.Settings.Mode
+		self._effMode = nil
+		if mode == "Instant" then
+			local prog = nearestGeneratorProgress()
+			if prog and prog >= 90 then
+				mode = "Normal"
+				self._effMode = "Normal"
+			end
+		end
 		local goal = check:FindFirstChild("Goal")
 		local trap = check:FindFirstChild("TrapPerfect") or check:FindFirstChild("TrapGoal")
 
 		if mode == "Instant" then
-			local target = trap and trap.Visible and trap or (goal and goal.Visible and goal)
+			-- TrapPerfect's hit window is centered on ITS OWN rotation (no
+			-- offset); TrapGoal and the generator/heal Goal both use the
+			-- same +109 convention. Using the generator offset against a
+			-- TrapPerfect indicator would snap the needle to the wrong spot.
+			local trapPerfect = check:FindFirstChild("TrapPerfect")
+			local isTrapPerfect = trapPerfect and trapPerfect.Visible
+			local target = isTrapPerfect and trapPerfect or (trap and trap.Visible and trap) or (goal and goal.Visible and goal)
 			if not target then return end
+
+			if self._instantPromptAt == nil or self._instantPromptTarget ~= target then
+				self._instantPromptAt = os.clock()
+				self._instantPromptTarget = target
+			end
+			-- Ping-adaptive settle time: firing the instant a prompt appears
+			-- (especially on higher ping) can land before the check's own
+			-- Line/Goal have reached their real resting values.
+			local minWait = math.clamp(0.12 + getPingSeconds() * 0.6, 0.14, 0.28)
+			if os.clock() - self._instantPromptAt < minWait then return end
+
 			self._busy = true
+			local targetRot = isTrapPerfect and (target.Rotation % 360) or ((target.Rotation + self.Settings.InstantOffset) % 360)
+			ActiveLine, ActiveTargetRot = line, targetRot
+			line.Rotation = targetRot
 			task.spawn(function()
 				local fired = false
+				local lockActive = true
+				-- Keep re-asserting the rotation every rendered frame so the
+				-- game's own animation can't visibly snap it back (or a
+				-- fresh read somewhere re-derive it) in the gap between our
+				-- write and the server processing the input.
+				local lockConn = RunService.RenderStepped:Connect(function()
+					if lockActive and line and line.Parent then
+						line.Rotation = targetRot
+					end
+				end)
 				local ok = pcall(function()
-					-- Move the local indicator into the hit window, then send one real input.
-					line.Rotation = (target.Rotation + self.Settings.InstantOffset) % 360
-					RunService.Heartbeat:Wait()
+					for _ = 1, 2 do
+						line.Rotation = targetRot
+						RunService.Heartbeat:Wait()
+					end
 					fired = self:_fireActionV91()
 				end)
+				task.wait(0.10)
+				lockActive = false
+				if lockConn then lockConn:Disconnect() end
+				task.wait(0.15)
+				if ActiveLine == line then ActiveLine, ActiveTargetRot = nil, nil end
+				self._instantPromptAt, self._instantPromptTarget = nil, nil
 				if fired and ok then
 					self.Stats.Hits = self.Stats.Hits + 1
 				else
@@ -4068,7 +4175,7 @@ State.SkillCheckObj = (function()
 	end
 
 	function Class:SetMode(mode)
-		local valid = { Legit = true, Normal = true }
+		local valid = { Legit = true, Normal = true, Instant = true }
 		if not valid[mode] then return false end
 		self.Settings.Mode = mode
 		self._randomModeIsNormal = false
@@ -5112,41 +5219,10 @@ local function KINON_ShouldPassFaceCheck(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local memo = Parry.FaceMemo
-	if not memo then
-		memo = setmetatable({}, { __mode = "k" })
-		Parry.FaceMemo = memo
-	end
-	local now = os.clock()
-	if memo[killerRoot] and now - memo[killerRoot] < 0.6 then
-		return true
-	end
-	local offset = playerRoot.Position - killerRoot.Position
-	local dist = offset.Magnitude
-	if dist <= 6 then
-		return true
-	end
-	local dir = offset.Unit
-	local sensitivity = math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10
-	local maxAngle = 20 + sensitivity * 100
-	local cosLimit = math.cos(math.rad(maxAngle))
-	local passed = killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit
-	if not passed then
-		local model = killerRoot.Parent
-		local head = model and model:FindFirstChild("Head")
-		if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
-			passed = true
-		end
-	end
-	if not passed then
-		local vel = killerRoot.AssemblyLinearVelocity
-		if vel and vel.Magnitude > 8 then
-			local velLimit = math.cos(math.rad(math.min(maxAngle + 20, 150)))
-			if vel.Unit:Dot(dir) >= velLimit then passed = true end
-		end
-	end
-	if passed then memo[killerRoot] = now end
-	return passed
+	local delta = playerRoot.Position - killerRoot.Position
+	if delta.Magnitude <= 0.001 then return true end
+	local angle = 15 + math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10 * 75
+	return killerRoot.CFrame.LookVector:Dot(delta.Unit) >= math.cos(math.rad(angle))
 end
 
 local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
@@ -5156,41 +5232,10 @@ local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local memo = ParryV2.FaceMemo
-	if not memo then
-		memo = setmetatable({}, { __mode = "k" })
-		ParryV2.FaceMemo = memo
-	end
-	local now = os.clock()
-	if memo[killerRoot] and now - memo[killerRoot] < 0.6 then
-		return true
-	end
-	local offset = playerRoot.Position - killerRoot.Position
-	local dist = offset.Magnitude
-	if dist <= 6 then
-		return true
-	end
-	local dir = offset.Unit
-	local sensitivity = math.clamp(tonumber(ParryV2.FaceSensitivity) or 10, 0, 10) / 10
-	local maxAngle = 20 + sensitivity * 100
-	local cosLimit = math.cos(math.rad(maxAngle))
-	local passed = killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit
-	if not passed then
-		local model = killerRoot.Parent
-		local head = model and model:FindFirstChild("Head")
-		if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
-			passed = true
-		end
-	end
-	if not passed then
-		local vel = killerRoot.AssemblyLinearVelocity
-		if vel and vel.Magnitude > 8 then
-			local velLimit = math.cos(math.rad(math.min(maxAngle + 20, 150)))
-			if vel.Unit:Dot(dir) >= velLimit then passed = true end
-		end
-	end
-	if passed then memo[killerRoot] = now end
-	return passed
+	local delta = playerRoot.Position - killerRoot.Position
+	if delta.Magnitude <= 0.001 then return true end
+	local angle = 15 + math.clamp(tonumber(ParryV2.FaceSensitivity) or 10, 0, 10) / 10 * 75
+	return killerRoot.CFrame.LookVector:Dot(delta.Unit) >= math.cos(math.rad(angle))
 end
 
 local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride, measuredVel, isLunge)
@@ -6119,6 +6164,21 @@ local function KINON_HandleAttackTrack(animTrack, model)
 
 	local okTime, timePosition = pcall(function() return animTrack.TimePosition or 0 end)
 	if okTime and timePosition > 0.45 then return end
+
+	do
+		local playerRoot0 = getRoot()
+		local killerRoot0 = model:FindFirstChild("HumanoidRootPart")
+		if playerRoot0 and killerRoot0 then
+			local pass0 = false
+			if Parry.Enabled then
+				pass0 = KINON_InRangeAndFacing(killerRoot0, playerRoot0)
+			elseif ParryV2.Enabled then
+				pass0 = KINON_InRangeAndFacingV2(killerRoot0, playerRoot0, nil, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true)
+			end
+			if pass0 and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
+			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0) then return end
+		end
+	end
 
 	task.spawn(function()
 		local startTime = tick()
@@ -9522,10 +9582,10 @@ do
 	local s = State.SkillCheck
 	local obj = State.SkillCheckObj
 	local card = addCard(0, "target", "Auto Skill Check", "", "SkillCheck")
-	if s.Mode ~= "Legit" and s.Mode ~= "Normal" then obj:SetMode("Legit") end
+	if s.Mode ~= "Legit" and s.Mode ~= "Normal" and s.Mode ~= "Instant" then obj:SetMode("Legit") end
 	local function sync() card.sub.Text = "Mode: " .. s.Mode end
 	sync()
-	addDropdown(card, "Mode", "list", { "Legit", "Normal" },
+	addDropdown(card, "Mode", "list", { "Legit", "Normal", "Instant" },
 		function(v) return v end,
 		function() return s.Mode end,
 		function(v) obj:SetMode(v); sync() end)
@@ -10917,389 +10977,6 @@ State.SpectatorCounter = (function()
 	return SC
 end)()
 
--- ================== Killer Perks Display (HUD) ==================
-State.KillerPerks = (function()
-	local KP = { Enabled = false, Gui = nil }
-	local WIDTH, HEADER_H, ROW_H = 190, 30, 20
-	local MAX_PERKS = 6
-	local position = UDim2.fromOffset(12, 64)
-	local minimized = false
-	local signature = nil
-	local conns = {}
-	local ui = {}
-
-	local IGNORE = {
-		head = true, torso = true, humanoid = true, humanoidrootpart = true,
-		["left arm"] = true, ["right arm"] = true, ["left leg"] = true, ["right leg"] = true,
-		["left hand"] = true, ["right hand"] = true,
-		["upper torso"] = true, ["lower torso"] = true,
-	}
-
-	-- "Perk Name 2" -> "Perk Name", "2"
-	local function parsePerk(nameStr)
-		local s = tostring(nameStr or "")
-		local base, lvl = s:match("^(.+)%s+(%d+)$")
-		if not base then return nil end
-		base = base:gsub("^%s+", ""):gsub("%s+$", "")
-		if base == "" or IGNORE[base:lower()] then return nil end
-		return base, lvl
-	end
-
-	local function findKiller()
-		for _, p in ipairs(Players:GetPlayers()) do
-			local team = p.Team
-			if team and team.Name:lower():find("killer", 1, true) then return p end
-		end
-		return nil
-	end
-
-	local function getPerks(player)
-		if not player then return {} end
-		local model = player.Character
-			or workspace:FindFirstChild(player.Name)
-			or workspace:FindFirstChild(player.DisplayName)
-		if not model then return {} end
-		local list, seen = {}, {}
-		for _, child in ipairs(model:GetChildren()) do
-			local perkName, lvl = parsePerk(child.Name)
-			if perkName and not seen[perkName] then
-				seen[perkName] = true
-				table.insert(list, { Name = perkName, Level = lvl })
-			end
-		end
-		table.sort(list, function(a, b) return a.Name < b.Name end)
-		return list
-	end
-
-	local function snapshot()
-		local killer = findKiller()
-		local name = killer and (killer.DisplayName or killer.Name) or "Unknown"
-		local perks = getPerks(killer)
-		if #perks == 0 then
-			for _, p in ipairs(Players:GetPlayers()) do
-				local list = getPerks(p)
-				if #list > 0 then
-					name = p.DisplayName or p.Name
-					perks = list
-					break
-				end
-			end
-		end
-		return name, perks
-	end
-
-	-- Ukuran dihitung manual supaya panel pasti tampil.
-	local function resize()
-		if not ui.panel or not ui.rows or not ui.body then return end
-		local rows = math.max(ui.rowCount or 1, 1)
-		local rowsH = rows * ROW_H + (rows - 1) * 2
-		ui.rows.Size = UDim2.new(1, 0, 0, rowsH)
-		local bodyH = 8 + 20 + 6 + 1 + 6 + rowsH + 10
-		ui.body.Size = UDim2.new(1, 0, 0, bodyH)
-		ui.panel.Size = UDim2.fromOffset(WIDTH, HEADER_H + (minimized and 0 or bodyH))
-	end
-
-	local function clearRows()
-		if not ui.rows then return end
-		for _, child in ipairs(ui.rows:GetChildren()) do
-			if not child:IsA("UIListLayout") then child:Destroy() end
-		end
-	end
-
-	local function addRow(order, text, level)
-		local row = make("Frame", {
-			LayoutOrder = order,
-			Size = UDim2.new(1, 0, 0, ROW_H),
-			BackgroundTransparency = 1,
-		}, ui.rows)
-		if not level then
-			make("TextLabel", {
-				Size = UDim2.fromScale(1, 1),
-				BackgroundTransparency = 1,
-				Font = Enum.Font.Gotham,
-				Text = text,
-				TextColor3 = Theme.Muted,
-				TextSize = 10,
-				TextXAlignment = Enum.TextXAlignment.Left,
-			}, row)
-			return
-		end
-		local dot = make("Frame", {
-			AnchorPoint = Vector2.new(0, 0.5),
-			Position = UDim2.new(0, 2, 0.5, 0),
-			Size = UDim2.fromOffset(4, 4),
-			BackgroundColor3 = Theme.Text,
-			BorderSizePixel = 0,
-		}, row)
-		corner(dot, 2)
-		local pill = make("Frame", {
-			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, 0, 0.5, 0),
-			Size = UDim2.fromOffset(34, 16),
-			BackgroundColor3 = Theme.Panel3,
-			BorderSizePixel = 0,
-		}, row)
-		corner(pill, 5)
-		make("TextLabel", {
-			Size = UDim2.fromScale(1, 1),
-			BackgroundTransparency = 1,
-			Font = Enum.Font.GothamBold,
-			Text = "LV " .. tostring(level),
-			TextColor3 = Theme.Muted,
-			TextSize = 8,
-		}, pill)
-		make("TextLabel", {
-			Position = UDim2.fromOffset(14, 0),
-			Size = UDim2.new(1, -54, 1, 0),
-			BackgroundTransparency = 1,
-			Font = Enum.Font.Gotham,
-			Text = text,
-			TextColor3 = Theme.Label,
-			TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-		}, row)
-	end
-
-	function KP.Refresh()
-		if not KP.Enabled or not ui.rows then return end
-		local name, perks = snapshot()
-		local parts = { name }
-		for i = 1, math.min(#perks, MAX_PERKS) do
-			parts[#parts + 1] = perks[i].Name .. "#" .. tostring(perks[i].Level)
-		end
-		local sig = table.concat(parts, "|")
-		if sig == signature then return end
-		signature = sig
-
-		ui.name.Text = name
-		clearRows()
-		if #perks == 0 then
-			ui.rowCount = 1
-			addRow(1, "Waiting for perk data...", nil)
-		else
-			ui.rowCount = math.min(#perks, MAX_PERKS)
-			for i = 1, ui.rowCount do
-				addRow(i, perks[i].Name, perks[i].Level or "?")
-			end
-		end
-		resize()
-	end
-
-	local function setMinimized(value)
-		minimized = value
-		if ui.body then ui.body.Visible = not value end
-		if ui.minHolder then
-			for _, child in ipairs(ui.minHolder:GetChildren()) do child:Destroy() end
-			icon(ui.minHolder, value and "plus" or "minus", 12, Theme.Text)
-		end
-		resize()
-	end
-
-	local function clampPosition(x, y)
-		local screen = ui.screen and ui.screen.AbsoluteSize or Vector2.new(800, 600)
-		local size = ui.panel and ui.panel.AbsoluteSize or Vector2.new(WIDTH, HEADER_H)
-		return math.clamp(x, 0, math.max(screen.X - size.X, 0)), math.clamp(y, 0, math.max(screen.Y - size.Y, 0))
-	end
-
-	function KP.Stop()
-		KP.Enabled = false
-		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-		table.clear(conns)
-		if KP.Gui then pcall(function() KP.Gui:Destroy() end) end
-		KP.Gui = nil
-		ui = {}
-		signature = nil
-	end
-
-	local function build()
-		local gui = make("ScreenGui", {
-			Name = "KinonKillerPerks",
-			ResetOnSpawn = false,
-			IgnoreGuiInset = true,
-			DisplayOrder = 1001, -- di atas window hub
-			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		}, UIParent)
-		if gui.Parent == nil then gui.Parent = LP:WaitForChild("PlayerGui") end
-		KP.Gui = gui
-		ui.screen = gui
-
-		local panel = make("Frame", {
-			Name = "Panel",
-			Position = position,
-			Size = UDim2.fromOffset(WIDTH, HEADER_H + 80),
-			BackgroundColor3 = Theme.Background,
-			BackgroundTransparency = 0.05,
-			BorderSizePixel = 0,
-		}, gui)
-		corner(panel, 12)
-		stroke(panel, Color3.fromRGB(120, 120, 120), 1, 0.25)
-		ui.panel = panel
-
-		-- header (drag handle) + minimize button, top right
-		local header = make("Frame", {
-			Size = UDim2.new(1, 0, 0, HEADER_H),
-			BackgroundColor3 = Theme.Panel,
-			BorderSizePixel = 0,
-		}, panel)
-		corner(header, 12)
-		make("Frame", {
-			Position = UDim2.new(0, 0, 1, -12),
-			Size = UDim2.new(1, 0, 0, 12),
-			BackgroundColor3 = Theme.Panel,
-			BorderSizePixel = 0,
-		}, header)
-		make("Frame", {
-			Position = UDim2.new(0, 0, 1, -1),
-			Size = UDim2.new(1, 0, 0, 1),
-			BackgroundColor3 = Theme.Stroke,
-			BackgroundTransparency = 0.45,
-			BorderSizePixel = 0,
-		}, header)
-
-		local headIcon = make("Frame", {
-			Position = UDim2.fromOffset(8, 7),
-			Size = UDim2.fromOffset(16, 16),
-			BackgroundTransparency = 1,
-		}, header)
-		icon(headIcon, "list-checks", 14, Theme.Text)
-		make("TextLabel", {
-			Position = UDim2.fromOffset(30, 0),
-			Size = UDim2.new(1, -66, 1, 0),
-			BackgroundTransparency = 1,
-			Font = Enum.Font.GothamBold,
-			Text = "KILLER PERKS",
-			TextColor3 = Theme.Text,
-			TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left,
-		}, header)
-
-		local minBtn = make("TextButton", {
-			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, -6, 0.5, 0),
-			Size = UDim2.fromOffset(22, 22),
-			BackgroundColor3 = Theme.Panel3,
-			BorderSizePixel = 0,
-			Text = "",
-			AutoButtonColor = false,
-		}, header)
-		corner(minBtn, 7)
-		stroke(minBtn, Theme.Stroke, 1, 0.4)
-		ui.minHolder = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, minBtn)
-		table.insert(conns, minBtn.MouseEnter:Connect(function()
-			tween(minBtn, 0.1, { BackgroundColor3 = Theme.Panel4 })
-		end))
-		table.insert(conns, minBtn.MouseLeave:Connect(function()
-			tween(minBtn, 0.1, { BackgroundColor3 = Theme.Panel3 })
-		end))
-		table.insert(conns, minBtn.MouseButton1Click:Connect(function()
-			setMinimized(not minimized)
-		end))
-
-		-- body
-		local body = make("Frame", {
-			Position = UDim2.fromOffset(0, HEADER_H),
-			Size = UDim2.new(1, 0, 0, 60),
-			BackgroundTransparency = 1,
-		}, panel)
-		padding(body, 10, 10, 8, 10)
-		make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, body)
-		ui.body = body
-
-		local nameRow = make("Frame", {
-			LayoutOrder = 1,
-			Size = UDim2.new(1, 0, 0, 20),
-			BackgroundTransparency = 1,
-		}, body)
-		local nameIcon = make("Frame", {
-			Size = UDim2.fromOffset(20, 20),
-			BackgroundColor3 = Theme.Panel3,
-			BorderSizePixel = 0,
-		}, nameRow)
-		corner(nameIcon, 6)
-		icon(nameIcon, "skull", 12, Theme.Text)
-		ui.name = make("TextLabel", {
-			Position = UDim2.fromOffset(28, 0),
-			Size = UDim2.new(1, -28, 1, 0),
-			BackgroundTransparency = 1,
-			Font = Enum.Font.GothamBold,
-			Text = "Unknown",
-			TextColor3 = Theme.Text,
-			TextSize = 11,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-		}, nameRow)
-
-		make("Frame", {
-			LayoutOrder = 2,
-			Size = UDim2.new(1, 0, 0, 1),
-			BackgroundColor3 = Theme.Stroke,
-			BackgroundTransparency = 0.5,
-			BorderSizePixel = 0,
-		}, body)
-
-		ui.rows = make("Frame", {
-			LayoutOrder = 3,
-			Size = UDim2.new(1, 0, 0, ROW_H),
-			BackgroundTransparency = 1,
-		}, body)
-		make("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, ui.rows)
-
-		setMinimized(minimized)
-
-		-- drag by header (mouse + touch)
-		local dragging, dragInput, dragStart, startX, startY = false, nil, nil, 0, 0
-		table.insert(conns, header.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				dragging = true
-				dragInput = input
-				dragStart = Vector2.new(input.Position.X, input.Position.Y)
-				startX, startY = panel.Position.X.Offset, panel.Position.Y.Offset
-			end
-		end))
-		table.insert(conns, UserInputService.InputChanged:Connect(function(input)
-			if not dragging then return end
-			if input.UserInputType ~= Enum.UserInputType.MouseMovement
-				and input.UserInputType ~= Enum.UserInputType.Touch then return end
-			if input.UserInputType == Enum.UserInputType.Touch and input ~= dragInput then return end
-			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
-			local x, y = clampPosition(startX + delta.X, startY + delta.Y)
-			position = UDim2.fromOffset(x, y)
-			panel.Position = position
-		end))
-		table.insert(conns, UserInputService.InputEnded:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				dragging = false
-			end
-		end))
-
-		KP.Refresh()
-		task.spawn(function()
-			while KP.Enabled and KP.Gui == gui and not unloaded do
-				task.wait(1)
-				if KP.Enabled and KP.Gui == gui then pcall(KP.Refresh) end
-			end
-		end)
-	end
-
-	function KP.Start()
-		if KP.Enabled then return end
-		KP.Stop()
-		KP.Enabled = true
-		local ok, err = pcall(build)
-		if not ok then
-			warn("[Kinon] Killer Perks Display gagal dibuat: " .. tostring(err))
-			KP.Stop()
-		else
-			print("[Kinon] Killer Perks Display aktif")
-		end
-	end
-
-	return KP
-end)()
-
 -- ================== Killer Skill Cooldown (HUD) ==================
 do
 	local s = State.ESPPlayer
@@ -11480,11 +11157,6 @@ end)()
 		function(v)
 			if v then State.SpectatorCounter.Start() else State.SpectatorCounter.Stop() end
 		end)
-	addCheckbox(card, "Killer Perks Display", "list-checks",
-		function() return State.KillerPerks.Enabled end,
-		function(v)
-			if v then State.KillerPerks.Start() else State.KillerPerks.Stop() end
-		end)
 	addCheckbox(card, "Streamer Mode", "video-off",
 		function() return State.StreamerMode.Enabled end,
 		function(v) State.StreamerMode.SetEnabled(v) end)
@@ -11637,8 +11309,16 @@ do
 
 	local function InstallAlwaysFastVaultHooks()
 		local rs = game:GetService("ReplicatedStorage")
+		-- Use the raw global require instead of whatever "require" currently
+		-- resolves to in this scope. On some executors the environment's
+		-- require can return a fresh/sandboxed copy of the module instead of
+		-- the exact table the game's own scripts hold a reference to - hook
+		-- that copy and the game never sees the override, so Always Fast
+		-- Vault silently does nothing. rawget(_G, "require") reliably gets
+		-- the real one.
+		local dynRequire = rawget(_G, "require") or require
 		pcall(function()
-			local module = require(rs:WaitForChild("Modules"):WaitForChild("Survivors"):WaitForChild("SurvivorVault"))
+			local module = dynRequire(rs:WaitForChild("Modules"):WaitForChild("Survivors"):WaitForChild("SurvivorVault"))
 			if module and type(module.evaluate) == "function" and not module._VDFastVaultHooked then
 				module._VDOriginalEvaluate = module.evaluate
 				module.evaluate = function(self, ...)
@@ -11651,7 +11331,7 @@ do
 			end
 		end)
 		pcall(function()
-			local module = require(rs:WaitForChild("Modules"):WaitForChild("Survivors"):WaitForChild("SurvivorAnimationsController"))
+			local module = dynRequire(rs:WaitForChild("Modules"):WaitForChild("Survivors"):WaitForChild("SurvivorAnimationsController"))
 			if module and type(module._validateFastVault) == "function" and not module._VDFastVaultHooked then
 				module._VDOriginalValidateFastVault = module._validateFastVault
 				module._validateFastVault = function(self, ...)
@@ -11908,43 +11588,71 @@ do
 	end
 
 	do
+		-- Fast Break Pallet v2: deteksi aksi lebih luas (cocok substring
+		-- "pallet"/"break"/"kick" di action string ATAU di nama animasi yang
+		-- sedang main, bukan cuma daftar nama aksi yang persis sama), dengan
+		-- Immobile + animasi pallet sebagai fallback terakhir. Atribut yang
+		-- diubah sengaja dibatasi ke breakspeed/PalletBreakSpeed saja (bukan
+		-- InteractSpeed/ActionSpeed) karena dua atribut itu juga dipakai aksi
+		-- lain (perbaikan generator, hook, dll) - kalau ikut diubah, aksi
+		-- lain itu ikut kebawa cepat juga. Nilai asli tetap dikembalikan saat
+		-- aksinya bukan lagi pallet break, supaya breakspeed tidak permanen
+		-- nyangkut di nilai boost.
 		local breakConn
 		local origAttrs = {}
-		-- Hanya atribut khusus pallet. InteractSpeed/ActionSpeed dihapus karena dipakai
-		-- juga oleh aksi lain (hancurkan generator, hook, dll).
-		local BREAK_ATTRS = { "breakspeed", "PalletBreakSpeed" }
-		local BREAK_ACTIONS = { Breaking = true, PalletBreak = true, Palletwrong = true }
-		local PALLET_RANGE = 14
+		local BREAK_ATTRS = { "breakspeed", "PalletBreakSpeed", "InteractSpeed", "ActionSpeed" }
+		local PALLET_WORDS = { "pallet", "break", "kick" }
+		local OTHER_WORDS = { "heal", "repair", "generator", "vault", "window", "unhook", "hook", "gate", "carry", "pickup", "grab", "sabotage", "stalk" }
 		local palletCache, palletCacheAt = {}, 0
-
-		local function palletPosition(obj)
-			if obj:IsA("Model") then
-				local ok, cf = pcall(obj.GetPivot, obj)
-				return ok and cf.Position or nil
-			elseif obj:IsA("BasePart") then
-				return obj.Position
-			end
-		end
-
-		-- True hanya kalau killer berada dekat pallet. Daftar pallet di-cache beberapa detik
-		-- dan baru dicari saat aksi "breaking" terdeteksi, jadi tidak membebani tiap frame.
-		local function nearPallet(root)
-			local now = os.clock()
-			if now - palletCacheAt > 4 then
-				palletCacheAt = now
-				table.clear(palletCache)
-				for _, d in ipairs(workspace:GetDescendants()) do
-					if d.Name == "Pallet" or d.Name == "Palletwrong" then
-						if d:IsA("Model") or d:IsA("BasePart") then table.insert(palletCache, d) end
-					elseif d.Name == "PrimaryPartPallet" and d:IsA("BasePart") and d.Parent then
-						table.insert(palletCache, d.Parent)
+		local function nearPallet(char)
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if not root then return false end
+			if os.clock() - palletCacheAt > 3 then
+				palletCacheAt = os.clock()
+				palletCache = {}
+				pcall(function()
+					for _, d in ipairs(workspace:GetDescendants()) do
+						if (d.Name == "Pallet" or d.Name == "Palletwrong") and (d:IsA("Model") or d:IsA("BasePart")) then
+							palletCache[#palletCache + 1] = d
+						end
 					end
+				end)
+			end
+			for _, p in ipairs(palletCache) do
+				if p.Parent then
+					local ok, pos = pcall(function() return p:GetPivot().Position end)
+					if ok and pos and (pos - root.Position).Magnitude <= 10 then return true end
 				end
 			end
-			for _, pallet in ipairs(palletCache) do
-				if pallet.Parent then
-					local pos = palletPosition(pallet)
-					if pos and (pos - root.Position).Magnitude <= PALLET_RANGE then return true end
+			return false
+		end
+		local lastDbg
+		local function dbg(...)
+			local msg = table.concat({ ... }, " ")
+			if msg == lastDbg then return end
+			lastDbg = msg
+			print("[FastBreak] " .. msg)
+		end
+
+		local function isPalletAction(actionStr)
+			if not actionStr or actionStr == "" then return false end
+			local lower = string.lower(tostring(actionStr))
+			for _, w in ipairs(PALLET_WORDS) do
+				if lower:find(w, 1, true) then return true end
+			end
+			return false
+		end
+
+		local function hasPalletAnim(animator)
+			if not animator then return false end
+			local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+			if not ok or not tracks then return false end
+			for _, track in ipairs(tracks) do
+				if track.Animation then
+					local n = string.lower(track.Animation.Name or "")
+					for _, w in ipairs(PALLET_WORDS) do
+						if n:find(w, 1, true) then return true end
+					end
 				end
 			end
 			return false
@@ -11977,21 +11685,44 @@ do
 					or (LP.Team and string.find(string.lower(LP.Team.Name), "killer", 1, true))
 				if not isKiller then return end
 
-				-- Hanya saat aksi memecah pallet. Status Immobile umum tidak dipakai lagi karena
-				-- juga aktif saat menghancurkan generator, menge-hook, mengangkat survivor, dll.
-				local breaking = false
 				local ci = char:FindFirstChild("CheckInterractable")
-				if ci then
-					local action = ci:GetAttribute("action") or ci:GetAttribute("Action")
-					breaking = BREAK_ACTIONS[action] == true
+				local action = ci and (ci:GetAttribute("action") or ci:GetAttribute("Action"))
+				local actionLower = action and string.lower(tostring(action)) or ""
+				local actionIsPallet = isPalletAction(action)
+
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				local animator = hum and hum:FindFirstChildOfClass("Animator")
+				local animIsPallet = hasPalletAnim(animator)
+
+				-- Action ada tapi jelas bukan pallet (heal/repair/vault/unhook/dll) -> lepas segera.
+				local otherAction = false
+				if actionLower ~= "" and not actionIsPallet then
+					for _, w in ipairs(OTHER_WORDS) do
+						if actionLower:find(w, 1, true) then otherAction = true; break end
+					end
 				end
-				local root = char:FindFirstChild("HumanoidRootPart")
-				if not (breaking and root and nearPallet(root)) then
-					restoreAttrs() -- aksi lain: kembalikan nilai asli segera
+				if otherAction then
+					dbg("skip: action =", actionLower)
+					restoreAttrs()
 					return
 				end
 
-				local mult = math.clamp(tonumber(U.PalletBreakMult) or 5, 1, 10)
+				local shouldBoost = actionIsPallet or animIsPallet
+				if not shouldBoost then
+					local isImmobile = char:GetAttribute("Immobile") or char:GetAttribute("immobile")
+					if isImmobile and (animIsPallet or nearPallet(char)) then
+						shouldBoost = true
+					end
+				end
+
+				if not shouldBoost then
+					dbg("idle | action =", actionLower)
+					restoreAttrs()
+					return
+				end
+
+				dbg("BOOST | action =", actionLower, "| anim =", tostring(animIsPallet), "| immobile =", tostring(char:GetAttribute("Immobile") or char:GetAttribute("immobile") or false))
+				local mult = math.clamp(tonumber(U.PalletBreakMult) or 5, 1, 20)
 				pcall(function()
 					for _, name in ipairs(BREAK_ATTRS) do
 						if origAttrs[name] == nil then
@@ -12002,22 +11733,18 @@ do
 					end
 				end)
 
-				local hum = char:FindFirstChildOfClass("Humanoid")
-				if hum then
-					local animator = hum:FindFirstChildOfClass("Animator")
-					if animator then
-						for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-							if track.Animation then
-								local n = string.lower(track.Animation.Name)
-								if n:find("pallet", 1, true) or n:find("break", 1, true) or n:find("kick", 1, true) then
-									track:AdjustSpeed(mult)
-								end
+				if animator then
+					for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+						if track.Animation then
+							local n = string.lower(track.Animation.Name or "")
+							for _, w in ipairs(PALLET_WORDS) do
+								if n:find(w, 1, true) then track:AdjustSpeed(mult); break end
 							end
 						end
 					end
-					if hum.WalkSpeed == 0 then
-						hum.WalkSpeed = 16 * math.min(mult, 3)
-					end
+				end
+				if hum and hum.WalkSpeed == 0 then
+					hum.WalkSpeed = 16 * math.min(mult, 3)
 				end
 			end)
 		end
@@ -12614,8 +12341,8 @@ do
 		function() return math.clamp(math.floor(tonumber(s.AutoStalkRange) or 150), 20, 500) end,
 		function(v) s.AutoStalkRange = v end)
 	util(kill, "Fast Break Pallet", "zap", "FastBreakPalletK")
-	addSlider(kill, "Fast Break Pallet Speed", "gauge", 1, 10,
-		function() return math.clamp(math.floor(tonumber(s.PalletBreakMult) or 5), 1, 10) end,
+	addSlider(kill, "Fast Break Pallet Speed", "gauge", 1, 20,
+		function() return math.clamp(math.floor(tonumber(s.PalletBreakMult) or 5), 1, 20) end,
 		function(v) s.PalletBreakMult = v end)
 	addSlider(kill, "Dash Lock Radius", "ruler", 20, 150,
 		function() return math.clamp(math.floor(tonumber(s.DashRadius) or 50), 20, 150) end,
@@ -13934,7 +13661,6 @@ local function unload()
 	pcall(function() State.SilentObj:Destroy() end)
 	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.SpectatorCounter.Stop() end)
-	pcall(function() State.KillerPerks.Stop() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
