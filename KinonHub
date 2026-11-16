@@ -32,6 +32,7 @@ local Parry = {
 	ReachBonus = 2,
 	FaceSensitivity = 10,
 	AggressiveMode = true,
+	SafetyParry = true,
 	Distance = 15,
 	FaceBias = 10,
 	CircleVisible = false,
@@ -44,6 +45,7 @@ local ParryV2 = {
 	ReachBonus = 2,
 	FaceSensitivity = 10,
 	AggressiveMode = true,
+	SafetyParry = true,
 	CircleVisible = false,
 	RangeColor = Color3.fromRGB(100, 200, 255),
 }
@@ -3834,18 +3836,21 @@ State.SkillCheckObj = (function()
 	-- there is only ever one SkillCheckObj instance anyway.
 	local ActiveLine, ActiveTargetRot = nil, nil
 	local rotationHookInstalled = false
-	pcall(function()
-		if hookmetamethod and not rotationHookInstalled then
-			local origIndex
-			origIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-				if key == "Rotation" and ActiveLine and self == ActiveLine and ActiveTargetRot and not (checkcaller and checkcaller()) then
-					return ActiveTargetRot
-				end
-				return origIndex(self, key)
-			end))
-			rotationHookInstalled = true
-		end
-	end)
+	local function installRotationHook()
+		if rotationHookInstalled then return end
+		pcall(function()
+			if hookmetamethod then
+				local origIndex
+				origIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+					if key == "Rotation" and ActiveLine and self == ActiveLine and ActiveTargetRot and not (checkcaller and checkcaller()) then
+						return ActiveTargetRot
+					end
+					return origIndex(self, key)
+				end))
+				rotationHookInstalled = true
+			end
+		end)
+	end
 
 	local function getPingSeconds()
 		local ping = 0.06
@@ -4152,6 +4157,7 @@ State.SkillCheckObj = (function()
 
 	function Class:Start()
 		self.Settings.Enabled = true
+		if self.Settings.Mode == "Instant" then installRotationHook() end
 		if self._heartbeat then return end
 		self:_hookKingScourge()
 		self._heartbeat = RunService.Heartbeat:Connect(function()
@@ -4178,6 +4184,7 @@ State.SkillCheckObj = (function()
 		local valid = { Legit = true, Normal = true, Instant = true }
 		if not valid[mode] then return false end
 		self.Settings.Mode = mode
+		if mode == "Instant" then installRotationHook() end
 		self._randomModeIsNormal = false
 		return true
 	end
@@ -5918,12 +5925,29 @@ do
 	end))
 end
 
+local function KINON_SafetyOn()
+	return (Parry.Enabled and Parry.SafetyParry ~= false) or (ParryV2.Enabled and ParryV2.SafetyParry ~= false)
+end
+
+local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }
+local function KINON_SafeToParry(character)
+	if not character then return false end
+	if character:GetAttribute("Knocked") == true or character:GetAttribute("IsHooked") == true then return false end
+	local interactable = character:FindFirstChild("CheckInterractable")
+	if not interactable then return true end
+	for _, attr in ipairs(KINON_SafetyAttrs) do
+		if interactable:GetAttribute(attr) == true then return false end
+	end
+	return true
+end
+
 local KINON_BusyAttrPatterns = {
-	"repair","generator","unhook","hooking","rescu","gate","vault","pallet","dropping","interact","opening",
+	"repair","generator","unhook","hooking","rescu","gate","vault","slid","mantle","pallet","dropping","interact","opening",
 }
 local KINON_BusyAnimKeywords = {
 	"repair","generator","unhook","rescue","hook","gate","exit","vault","window","pallet","drop",
 }
+local KINON_VaultAnimKeywords = { "vault", "window", "slide", "sliding", "mantle", "climb", "leap" }
 
 local function KINON_AttrBusy(instance)
 	local ok, attrs = pcall(function() return instance:GetAttributes() end)
@@ -5948,12 +5972,31 @@ local function KINON_IsBusyInteracting()
 	local character = LP.Character
 	if not character then return false end
 	if KINON_AttrBusy(character) or KINON_AttrBusy(LP) then return true end
+	local safetyOn = KINON_SafetyOn()
+	local interactable = character:FindFirstChild("CheckInterractable")
+	if safetyOn and interactable and KINON_AttrBusy(interactable) then
+		KINON_Busy.UntilTime = math.max(KINON_Busy.UntilTime, now + 0.25)
+		return true
+	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
 	if animator then
 		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
 		if ok and tracks then
 			for _, playing in ipairs(tracks) do
+				local anyLabel = ""
+				pcall(function()
+					anyLabel = string.lower(tostring(playing.Name) .. " "
+						.. tostring(playing.Animation and playing.Animation.Name or ""))
+				end)
+				if safetyOn and anyLabel ~= "" and not anyLabel:find("parry", 1, true) then
+					for _, keyword in ipairs(KINON_VaultAnimKeywords) do
+						if anyLabel:find(keyword, 1, true) then
+							KINON_Busy.UntilTime = math.max(KINON_Busy.UntilTime, now + 0.25)
+							return true
+						end
+					end
+				end
 				local label = ""
 				pcall(function()
 					local pr = playing.Priority
@@ -5988,13 +6031,14 @@ local function KINON_TryParry(reason, killerRoot)
 	if tick() - KINON_ParryEngine.LastAttempt < (veryClose and 0.001 or (closeNow and 0.003 or 0.012)) then return false end
 	if not KINON_GetParryTool() then return false end
 	local nowBusy = tick()
-	if nowBusy - (KINON_ParryEngine.BusyAt or 0) > 0.04 then
+	if nowBusy - (KINON_ParryEngine.BusyAt or 0) > 0.02 then
 		KINON_ParryEngine.BusyAt = nowBusy
 		KINON_ParryEngine.BusyVal = KINON_IsBusyInteracting()
 	end
 	if KINON_ParryEngine.BusyVal then return false end
 
 	local character = LP.Character
+	if KINON_SafetyOn() and not KINON_SafeToParry(character) then return false end
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not character or not humanoid or humanoid.Health <= 0 then return false end
 	if character:GetAttribute("Knocked") == true or LP:GetAttribute("Knocked") == true
@@ -9737,6 +9781,10 @@ do
 		function() return s.AggressiveMode end,
 		function(v) s.AggressiveMode = v end)
 
+	addCheckbox(card, "Safety Parry", "shield",
+		function() return s.SafetyParry ~= false end,
+		function(v) s.SafetyParry = v end)
+
 	addCheckbox(card, "Button Parry", "mouse-pointer-click",
 		function() return FloatingParryButtonEnabled end,
 		function(v)
@@ -9812,6 +9860,10 @@ do
 	addCheckbox(card, "Aggressive Mode", "zap",
 		function() return s.AggressiveMode end,
 		function(v) s.AggressiveMode = v end)
+
+	addCheckbox(card, "Safety Parry", "shield",
+		function() return s.SafetyParry ~= false end,
+		function(v) s.SafetyParry = v end)
 
 	addCheckbox(card, "Button Parry", "mouse-pointer-click",
 		function() return FloatingParryButtonEnabledV2 end,
@@ -11191,33 +11243,37 @@ end
 State.Utilities = {
 	Enabled = false,
 	AntiBlindFlashlightK = false, DashLockK = false, AimlockAttackK = false, NoSlowDown = false,
-	PalletReflexS = false,
 	AutoRun = false,
 	AlwaysFastVaultS = false, UnlimitedVaultS = false,
 	AutoDodgeAbyssS = false,
 	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13,
 	FastBreakPalletK = false, PalletBreakMult = 5,
 	AutoStalkK = false, AutoStalkRange = 150,
-	SelfHealS = false, SelfHealAllS = false, HealThreshold = 90,
+	SelfHealAllS = false, HealThreshold = 90,
 	DashRadius = 50, AimRadius = 50,
 }
 State.UtilityHandlers = {}
+State.UtilApplied = {}
 State.UtilitiesS = { Enabled = false }
 State.UtilitiesK = { Enabled = false }
 State.UtilGroup = {
 	NoSlowDown = "Utilities", AutoRun = "Utilities",
 	AntiBlindFlashlightK = "UtilitiesK", DashLockK = "UtilitiesK", AimlockAttackK = "UtilitiesK",
-	PalletReflexS = "UtilitiesS", AlwaysFastVaultS = "UtilitiesS",
+	AlwaysFastVaultS = "UtilitiesS",
 	UnlimitedVaultS = "UtilitiesS", AutoDodgeAbyssS = "UtilitiesS",
 	VaultSpeedS = "UtilitiesS", FlowstateS = "UtilitiesS",
 	FastBreakPalletK = "UtilitiesK", AutoStalkK = "UtilitiesK",
-	SelfHealS = "UtilitiesS", SelfHealAllS = "UtilitiesS",
+	SelfHealAllS = "UtilitiesS",
 }
 local function applyUtilities()
 	local u = State.Utilities
 	for key, handler in pairs(State.UtilityHandlers) do
 		local g = State[State.UtilGroup[key] or "Utilities"]
-		pcall(handler, g.Enabled == true and u[key] == true)
+		local want = g.Enabled == true and u[key] == true
+		if (State.UtilApplied[key] or false) ~= want then
+			State.UtilApplied[key] = want
+			pcall(handler, want)
+		end
 	end
 end
 Hooks.Utilities = applyUtilities
@@ -11763,127 +11819,6 @@ do
 end
 
 do
-	local RunService = game:GetService("RunService")
-	local ReplicatedStorage = game:GetService("ReplicatedStorage")
-	local ENV = getgenv and getgenv() or _G
-	ENV.VD = ENV.VD or {}
-	local PR = { on = false, used = {}, lastScan = 0, lastDrop = 0, cache = {}, cacheAt = 0 }
-	State.PalletDist = 20
-	local hb, charConn
-
-	local function isSurvivor()
-		local team = LP.Team
-		return team ~= nil and (team.Name == "Survivors" or team.Name == "Survivor")
-	end
-
-	local function killerRoot()
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= LP and plr.Character and plr.Team and string.find(string.lower(plr.Team.Name), "killer", 1, true) then
-				local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-				if hrp then return hrp end
-			end
-		end
-		return nil
-	end
-
-	local function pallets()
-		local now = os.clock()
-		if now - PR.cacheAt < 1 then return PR.cache end
-		PR.cacheAt = now
-		local list = {}
-		local map = workspace:FindFirstChild("Map")
-		if map then
-			for _, obj in ipairs(map:GetDescendants()) do
-				if obj.Name == "Palletwrong" and (obj:IsA("Model") or obj:IsA("Folder")) then
-					list[#list + 1] = obj
-				end
-			end
-		end
-		PR.cache = list
-		return list
-	end
-
-	local function isDropped(m)
-		if not m or not m.Parent then return true end
-		if PR.used[m] then return true end
-		local ok1, d = pcall(function() return m:GetAttribute("Destroyed") end)
-		if ok1 and d == true then return true end
-		local ok2, b = pcall(function() return m:GetAttribute("Broken") end)
-		if ok2 and b == true then return true end
-		if not m:FindFirstChildWhichIsA("BasePart", true) then return true end
-		return false
-	end
-
-	local function slidePoint(m)
-		local sp = m:FindFirstChild("PalletPointSlide")
-		if sp then return sp end
-		for _, c in ipairs(m:GetDescendants()) do
-			if c.Name == "PalletPointSlide" then return c end
-		end
-		return m:FindFirstChild("PalletPoint")
-	end
-
-	local function dropEvent()
-		local r = ReplicatedStorage:FindFirstChild("Remotes")
-		local f = r and r:FindFirstChild("Pallet")
-		return f and f:FindFirstChild("PalletDropEvent")
-	end
-
-	local function step()
-		if not PR.on or not isSurvivor() then return end
-		local now = os.clock()
-		if now - PR.lastScan < 0.2 then return end
-		PR.lastScan = now
-		if now - PR.lastDrop < 2.5 then return end
-		pcall(function()
-			local char = LP.Character
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if not root or not hum or hum.Health <= 0 then return end
-			local k = killerRoot()
-			if not k then return end
-			if (root.Position - k.Position).Magnitude > State.PalletDist then return end
-			local ev = dropEvent()
-			if not ev then return end
-			local best, bestD = nil, 8
-			for _, pal in ipairs(pallets()) do
-				if not isDropped(pal) then
-					local ref = pal:FindFirstChild("PalletPoint") or pal:FindFirstChild("PalletPointSlide") or pal:FindFirstChildWhichIsA("BasePart", true)
-					if ref then
-						local d = (root.Position - ref.Position).Magnitude
-						if d < bestD then bestD = d; best = pal end
-					end
-				end
-			end
-			if best then
-				local target = slidePoint(best)
-				if target then
-					pcall(function() ev:FireServer(target) end)
-					PR.used[best] = true
-					PR.lastDrop = os.clock()
-				end
-			end
-		end)
-	end
-
-	State.UtilityHandlers.PalletReflexS = function(on)
-		PR.on = on == true
-		ENV.VD.PalletReflex = PR.on
-		if hb then hb:Disconnect(); hb = nil end
-		if charConn then charConn:Disconnect(); charConn = nil end
-		PR.used = {}
-		PR.cacheAt = 0
-		if PR.on then
-			hb = RunService.Heartbeat:Connect(step)
-			charConn = LP.CharacterAdded:Connect(function()
-				task.wait(0.5)
-				PR.used = {}
-				PR.cacheAt = 0
-			end)
-		end
-	end
-end
-do
 	local ReplicatedStorage = game:GetService("ReplicatedStorage")
 	local ABYSS_ANIMATION_ID = "100014992013740"
 	local TRIGGER_RANGE = 40
@@ -12153,53 +12088,57 @@ do
 	local HEAL_RANGE = 20
 	local REFIRE = 0.15
 
+	local objCache, objCacheAt = {}, 0
+	local function nearInteractable(char)
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+		if os.clock() - objCacheAt > 4 then
+			objCacheAt = os.clock()
+			objCache = {}
+			pcall(function()
+				for _, d in ipairs(workspace:GetDescendants()) do
+					if d:IsA("Model") then
+						local lower = string.lower(d.Name)
+						if lower == "generator" then
+							objCache[#objCache + 1] = { inst = d, kind = "gen", range = 10 }
+						elseif lower == "window" then
+							objCache[#objCache + 1] = { inst = d, kind = "win", range = 8 }
+						elseif lower == "gate" and d:FindFirstChild("ExitLever") then
+							objCache[#objCache + 1] = { inst = d, kind = "gate", range = 9 }
+						end
+					end
+				end
+			end)
+		end
+		for _, o in ipairs(objCache) do
+			local inst = o.inst
+			if inst.Parent and not (o.kind == "gen" and (tonumber(inst:GetAttribute("RepairProgress")) or 0) >= 100) then
+				local ok, pos = pcall(function() return inst:GetPivot().Position end)
+				if ok and pos and (pos - root.Position).Magnitude <= o.range then return true end
+			end
+		end
+		return false
+	end
+
+	local function busyWithOther(char)
+		if KINON_Busy and (KINON_Busy.HoldingPrompt or tick() < (KINON_Busy.UntilTime or 0)) then return true end
+		if nearInteractable(char) then return true end
+		local ci = char and char:FindFirstChild("CheckInterractable")
+		if ci then
+			for _, name in ipairs({ "isVaulting", "isRepairing", "isUnhooking", "isSliding", "isOpening", "isOpeningGate" }) do
+				if ci:GetAttribute(name) == true then return true end
+			end
+		end
+		if char and (char:GetAttribute("Knocked") == true or char:GetAttribute("IsHooked") == true
+			or char:GetAttribute("IsCarried") == true or char:GetAttribute("IsDead") == true) then
+			return true
+		end
+		return false
+	end
+
 	local function isMoving(char)
 		local h = char and char:FindFirstChildOfClass("Humanoid")
 		return h ~= nil and h.MoveDirection.Magnitude > 0.1
-	end
-
-	State.UtilityHandlers.SelfHealS = function(on)
-		if selfConn then selfConn:Disconnect(); selfConn = nil end
-		if selfAnimConn then selfAnimConn:Disconnect(); selfAnimConn = nil end
-		if selfCharConn then selfCharConn:Disconnect(); selfCharConn = nil end
-		if selfTrackConn then selfTrackConn:Disconnect(); selfTrackConn = nil end
-		if not on then
-			fireHeal(LP.Character, false)
-			return
-		end
-		task.spawn(hookAnimator, LP.Character)
-		selfCharConn = LP.CharacterAdded:Connect(function(c)
-			task.wait(0.3)
-			hookAnimator(c)
-		end)
-		selfAnimConn = RunService.Heartbeat:Connect(function()
-			local c = LP.Character
-			local h = c and c:FindFirstChildOfClass("Humanoid")
-			stopHealAnim(h and h:FindFirstChildOfClass("Animator"))
-		end)
-		local healing, last = false, 0
-		selfConn = RunService.Heartbeat:Connect(function()
-			local c = LP.Character
-			local h = c and c:FindFirstChildOfClass("Humanoid")
-			if not h or h.Health <= 0 then healing = false return end
-			local now = os.clock()
-			if h.Health >= h.MaxHealth * threshold() or isMoving(c) then
-				if healing then
-					healing = false
-					fireHeal(c, false)
-				end
-				return
-			end
-			if healing and now - last > REFIRE then
-				local ci = c:FindFirstChild("CheckInterractable")
-				if ci and not ci:GetAttribute("isHealing") then healing = false end
-			end
-			if not healing and now - last >= REFIRE then
-				healing = true
-				last = now
-				fireHeal(c, true)
-			end
-		end)
 	end
 
 	State.UtilityHandlers.SelfHealAllS = function(on)
@@ -12213,7 +12152,7 @@ do
 		allConn = RunService.Heartbeat:Connect(function()
 			local myChar = LP.Character
 			local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-			if not myRoot or isMoving(myChar) then
+			if not myRoot or isMoving(myChar) or busyWithOther(myChar) then
 				if st.target and st.healing then
 					fireHeal(st.target, false)
 					st.healing = false
@@ -12309,7 +12248,11 @@ do
 				s[key] = v
 				local handler = State.UtilityHandlers[key]
 				local g = State[State.UtilGroup[key] or "Utilities"]
-				if handler then pcall(handler, g.Enabled == true and v) end
+				if handler then
+					local want = g.Enabled == true and v == true
+					State.UtilApplied[key] = want
+					pcall(handler, want)
+				end
 			end)
 	end
 	local common = addCard(10, "wrench", "Utilities", "", "Utilities")
@@ -12317,7 +12260,6 @@ do
 	util(common, "Auto Run", "footprints", "AutoRun")
 
 	local surv = addCard(10, "wrench", "Survivor Utilities", "", "UtilitiesS")
-	util(surv, "Pallet Reflex", "layers", "PalletReflexS")
 	util(surv, "Always Fast Vault", "zap", "AlwaysFastVaultS")
 	util(surv, "Unlimited Vault", "infinity", "UnlimitedVaultS")
 	util(surv, "Auto Dodge Abyss", "shield", "AutoDodgeAbyssS")
@@ -12326,11 +12268,7 @@ do
 		function() return math.clamp(math.floor(tonumber(s.VaultSpeed) or 13), 10, 20) end,
 		function(v) s.VaultSpeed = v end)
 	util(surv, "Flowstate (No CD)", "zap", "FlowstateS")
-	util(surv, "Self Heal", "shield", "SelfHealS")
 	util(surv, "Heal Aura", "shield", "SelfHealAllS")
-	addSlider(surv, "Pallet Reflex Distance", "ruler", 5, 80,
-		function() return math.clamp(math.floor(tonumber(State.PalletDist) or 20), 5, 80) end,
-		function(v) State.PalletDist = v end)
 
 	local kill = addCard(10, "wrench", "Killer Utilities", "", "UtilitiesK")
 	util(kill, "Anti Blind Flashlight", "flashlight-off", "AntiBlindFlashlightK")
