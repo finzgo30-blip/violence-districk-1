@@ -11246,7 +11246,7 @@ State.Utilities = {
 	AutoRun = false,
 	AlwaysFastVaultS = false, UnlimitedVaultS = false,
 	AutoDodgeAbyssS = false,
-	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13,
+	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13, FlowstateCD = false, FlowstateDelay = 5,
 	FastBreakPalletK = false, PalletBreakMult = 5,
 	AutoStalkK = false, AutoStalkRange = 150,
 	SelfHealAllS = false, HealThreshold = 90,
@@ -11472,30 +11472,44 @@ do
 		end
 	end
 
-	State.UtilityHandlers.FlowstateS = function(state)
-		if flowConn then flowConn:Disconnect(); flowConn = nil end
-		if state then
-			local forced = false
-			flowConn = RunService.Heartbeat:Connect(function()
-				local char = LP.Character
-				local hum = char and char:FindFirstChildOfClass("Humanoid")
-				if not hum then return end
-				local blocked = hum.Health <= 0
-					or char:GetAttribute("IsHooked") == true
-					or char:GetAttribute("IsCarried") == true
-					or char:GetAttribute("Knocked") == true
-				local moving = hum.MoveDirection.Magnitude > 0.1
-					and hum.FloorMaterial ~= Enum.Material.Air
-				local want = moving and not blocked
-				if want then
-					if char:GetAttribute("Flowstate") ~= true then
-						pcall(function() char:SetAttribute("Flowstate", true) end)
-					end
-					forced = true
-				elseif forced then
-					forced = false
-					pcall(function() char:SetAttribute("Flowstate", false) end)
+	local flowChar, flowSig, flowAdded
+	local flowToken = 0
+	local function flowDelay()
+		if U.FlowstateCD == true then
+			return math.clamp(tonumber(U.FlowstateDelay) or 5, 1, 30)
+		end
+		return 0.05
+	end
+	local function flowClear()
+		if flowSig then flowSig:Disconnect(); flowSig = nil end
+		if flowAdded then flowAdded:Disconnect(); flowAdded = nil end
+		flowToken = flowToken + 1
+	end
+	local function flowApply(char)
+		if not char then return end
+		if flowSig then flowSig:Disconnect(); flowSig = nil end
+		flowChar = char
+		pcall(function() char:SetAttribute("Flowstate", true) end)
+		flowSig = char:GetAttributeChangedSignal("Flowstate"):Connect(function()
+			if char:GetAttribute("Flowstate") ~= false then return end
+			flowToken = flowToken + 1
+			local my = flowToken
+			task.delay(flowDelay(), function()
+				if my ~= flowToken or unloaded then return end
+				if char.Parent and flowChar == char and flowSig then
+					pcall(function() char:SetAttribute("Flowstate", true) end)
 				end
+			end)
+		end)
+	end
+
+	State.UtilityHandlers.FlowstateS = function(state)
+		flowClear()
+		if state then
+			flowApply(LP.Character)
+			flowAdded = LP.CharacterAdded:Connect(function(char)
+				task.wait(1)
+				flowApply(char)
 			end)
 		else
 			local char = LP.Character
@@ -12268,6 +12282,10 @@ do
 		function() return math.clamp(math.floor(tonumber(s.VaultSpeed) or 13), 10, 20) end,
 		function(v) s.VaultSpeed = v end)
 	util(surv, "Flowstate (No CD)", "zap", "FlowstateS")
+	util(surv, "Flowstate With Cooldown", "timer", "FlowstateCD")
+	addSlider(surv, "Flowstate Cooldown (s)", "timer", 1, 30,
+		function() return math.clamp(math.floor(tonumber(s.FlowstateDelay) or 5), 1, 30) end,
+		function(v) s.FlowstateDelay = v end)
 	util(surv, "Heal Aura", "shield", "SelfHealAllS")
 
 	local kill = addCard(10, "wrench", "Killer Utilities", "", "UtilitiesK")
