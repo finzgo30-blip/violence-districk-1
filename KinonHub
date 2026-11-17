@@ -11030,6 +11030,241 @@ State.HitAreaObj = (function()
 	return obj
 end)()
 
+State.VeilLineObj = (function()
+	local obj = {}
+	local THROW_IDS = { ["101443662521580"] = true, ["127622545856523"] = true }
+	local MAX_STEPS, STEP_DT = 44, 0.05
+	local BASE_SPEED, DROP = 180, 0.5
+	local LINGER = 0.08
+	local MAX_DIST = 400
+	local LINE_COLOR = Color3.fromRGB(205, 170, 255)
+	local DOT_COLOR = Color3.fromRGB(255, 80, 120)
+
+	local pool = {}
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.RespectCanCollide = true
+
+	local function guiParent()
+		local okHui, hui = pcall(function() return gethui and gethui() end)
+		if okHui and typeof(hui) == "Instance" then return hui end
+		return game:GetService("CoreGui")
+	end
+
+	local holder
+	local function getHolder()
+		if holder and holder.Parent then return holder end
+		holder = Instance.new("Folder")
+		holder.Name = "KinonVeilLine"
+		holder.Parent = guiParent()
+		return holder
+	end
+
+	local function newEntry()
+		local parent = getHolder()
+		local terrain = workspace.Terrain
+		local e = { segs = {} }
+		for i = 1, MAX_STEPS do
+			local l = Instance.new("LineHandleAdornment")
+			l.Adornee = terrain
+			l.AlwaysOnTop = true
+			l.ZIndex = 5
+			l.Color3 = LINE_COLOR
+			l.Transparency = 0.15
+			l.Thickness = 3
+			l.Visible = false
+			l.Parent = parent
+			e.segs[i] = l
+		end
+		local d = Instance.new("CylinderHandleAdornment")
+		d.Adornee = terrain
+		d.AlwaysOnTop = true
+		d.ZIndex = 6
+		d.Color3 = DOT_COLOR
+		d.Transparency = 0.25
+		d.Height = 0.06
+		d.Radius = 2
+		d.Visible = false
+		d.Parent = parent
+		e.dot = d
+		return e
+	end
+
+	local function hideEntry(e)
+		for _, l in ipairs(e.segs) do l.Visible = false end
+		e.dot.Visible = false
+	end
+
+	local function destroyEntry(e)
+		for _, l in ipairs(e.segs) do pcall(function() l:Destroy() end) end
+		pcall(function() e.dot:Destroy() end)
+	end
+
+	local function isVeil(plr, char)
+		local team = plr.Team and string.lower(plr.Team.Name) or ""
+		local killer = team:find("killer", 1, true) ~= nil or char:GetAttribute("MorphedKiller") ~= nil
+		if not killer then return false end
+		return char:GetAttribute("MorphedKiller") == "Veil" or char:GetAttribute("Veil") == true
+			or string.find(string.lower(char.Name), "veil", 1, true) ~= nil
+			or char:FindFirstChild("Spear") ~= nil
+	end
+
+	local function throwState(char)
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not animator then return nil end
+		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if not ok or not tracks then return nil end
+		for _, t in ipairs(tracks) do
+			local id = KINON_AnimationId(t)
+			local match = id ~= "" and THROW_IDS[id]
+			if not match and id ~= "" then
+				local label = ""
+				pcall(function()
+					label = string.lower(tostring(t.Name or "") .. " " .. tostring(t.Animation and t.Animation.Name or ""))
+				end)
+				match = label:find("spear", 1, true) and (label:find("throw", 1, true) or label:find("charge", 1, true))
+			end
+			if match then
+				local playing, pos = false, 0
+				pcall(function() playing = t.IsPlaying; pos = t.TimePosition or 0 end)
+				if playing then return pos end
+			end
+		end
+		return nil
+	end
+
+	local function groundPoint(pos, normal)
+		if normal.Y >= 0.6 then return pos, Vector3.yAxis end
+		local start = pos + normal * 0.4 + Vector3.new(0, 0.5, 0)
+		local down = workspace:Raycast(start, Vector3.new(0, -250, 0), rayParams)
+		if down and down.Normal.Y >= 0.6 then return down.Position, down.Normal end
+		return nil
+	end
+
+	local function compute(char)
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return nil end
+		local head = char:FindFirstChild("Head")
+		local look = head and head.CFrame.LookVector or hrp.CFrame.LookVector
+		if look.Magnitude < 0.01 then return nil end
+		local origin = (head and head.Position or (hrp.Position + Vector3.new(0, 1.5, 0))) + look * 2
+		return origin, look.Unit
+	end
+
+	local function drawPath(e, origin, dir, speed)
+		local g = Vector3.new(0, -(tonumber(workspace.Gravity) or 196.2) * DROP, 0)
+		local v0 = dir * speed
+		local prev = origin
+		local used = 0
+		local hitPos, hitNormal
+		for i = 1, MAX_STEPS do
+			local tt = i * STEP_DT
+			local nxt = origin + v0 * tt + 0.5 * g * tt * tt
+			local delta = nxt - prev
+			if delta.Magnitude > 0.01 then
+				local hit = workspace:Raycast(prev, delta, rayParams)
+				if hit then nxt = hit.Position; hitPos, hitNormal = hit.Position, hit.Normal end
+				local seg = e.segs[i]
+				seg.CFrame = CFrame.lookAt(prev, nxt)
+				seg.Length = (nxt - prev).Magnitude
+				seg.Visible = true
+				used = i
+			end
+			prev = nxt
+			if hitPos then break end
+		end
+		for i = used + 1, MAX_STEPS do e.segs[i].Visible = false end
+		if hitPos then
+			local gp, gn = groundPoint(hitPos, hitNormal)
+			if gp then
+				e.dot.CFrame = CFrame.lookAt(gp + gn * 0.05, gp + gn)
+				e.dot.Visible = true
+			else
+				e.dot.Visible = false
+			end
+		else
+			e.dot.Visible = false
+		end
+	end
+
+	local function release(plr)
+		local e = pool[plr]
+		if e then destroyEntry(e); pool[plr] = nil end
+	end
+
+	local function releaseAll()
+		for plr in pairs(pool) do release(plr) end
+		if holder then pcall(function() holder:Destroy() end); holder = nil end
+	end
+
+	local function step()
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local camPos = cam.CFrame.Position
+		local now = os.clock()
+
+		local filter = { cam }
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl.Character then filter[#filter + 1] = pl.Character end
+		end
+		rayParams.FilterDescendantsInstances = filter
+
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LP then
+				local char = plr.Character
+				local hrp = char and char:FindFirstChild("HumanoidRootPart")
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				if hrp and hum and hum.Health > 0 and (hrp.Position - camPos).Magnitude <= MAX_DIST and isVeil(plr, char) then
+					local e = pool[plr]
+					local pos = throwState(char)
+					if pos then
+						if not e then e = newEntry(); pool[plr] = e end
+						local origin, dir = compute(char)
+						if origin then
+							local charge = math.clamp(pos / 1, 0.15, 1)
+							e.speed = BASE_SPEED * charge
+							e.origin, e.dir = origin, dir
+							e.until_ = now + LINGER
+						end
+					end
+					if e and e.origin and (e.until_ or 0) > now then
+						if pos then
+							local origin, dir = compute(char)
+							if origin then e.origin, e.dir = origin, dir end
+						end
+						drawPath(e, e.origin, e.dir, e.speed or BASE_SPEED)
+					elseif e then
+						hideEntry(e)
+					end
+				else
+					local e = pool[plr]
+					if e then hideEntry(e) end
+				end
+			end
+		end
+	end
+
+	track(RunService.RenderStepped:Connect(function()
+		if unloaded then return end
+		local S = State.ESPPlayer
+		if not (S.Enabled and S.VeilLine == true) then
+			if next(pool) or holder then releaseAll() end
+			return
+		end
+		if not pcall(step) then releaseAll() end
+	end))
+
+	track(Players.PlayerRemoving:Connect(function(plr) release(plr) end))
+
+	function obj:Destroy()
+		releaseAll()
+	end
+
+	return obj
+end)()
+
 State.SpectatorCounter = (function()
 	local SC = { Enabled = false, Gui = nil, Label = nil }
 
@@ -11302,6 +11537,9 @@ end)()
 	addCheckbox(card, "Attack Line", "move-right",
 		function() return s.AttackLine == true end,
 		function(v) s.AttackLine = v end)
+	addCheckbox(card, "Veil Line", "crosshair",
+		function() return s.VeilLine == true end,
+		function(v) s.VeilLine = v end)
 	addCheckbox(card, "Attack Line Always On", "infinity",
 		function() return s.AttackLineAlways == true end,
 		function(v) s.AttackLineAlways = v end)
@@ -13766,6 +14004,7 @@ local function unload()
 	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.SpectatorCounter.Stop() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
+	pcall(function() State.VeilLineObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
 	pcall(function()
