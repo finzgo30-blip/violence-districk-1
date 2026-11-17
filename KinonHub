@@ -1530,6 +1530,7 @@ State.SpearObj = (function()
 	V.NamecallHandler = function(old, self, ...)
 		local method = getnamecallmethod()
 		if not V.Enabled or (method ~= "FireServer" and method ~= "fireServer") then
+			if setnamecallmethod and method then setnamecallmethod(method) end
 			return old(self, ...)
 		end
 		local isSpear = false
@@ -1776,7 +1777,14 @@ State.SpearObj = (function()
 					if State.AntiBlindOn and not (checkcaller and checkcaller()) and State.IsKillerNow and State.IsKillerNow() then
 						local blockBlind = false
 						pcall(function()
-							local n = string.lower(tostring(self:GetFullName()))
+							local n = string.lower(tostring(self.Name))
+							local par = self.Parent
+							local depth = 0
+							while par and depth < 6 do
+								n = n .. "." .. string.lower(tostring(par.Name))
+								par = par.Parent
+								depth = depth + 1
+							end
 							if n:find("blind", 1, true) then blockBlind = true end
 						end)
 						if blockBlind then return nil end
@@ -1794,6 +1802,7 @@ State.SpearObj = (function()
 						if setnamecallmethod then pcall(setnamecallmethod, method) end
 					end
 				end
+				if setnamecallmethod and method then setnamecallmethod(method) end
 				local handler = V.NamecallHandler
 				if handler then return handler(old, self, ...) end
 				return old(self, ...)
@@ -1881,7 +1890,9 @@ do
 		local m = marks[key]
 		if m and m.char == char and m.highlight and m.highlight.Parent == char then
 			m.highlight.FillColor = color
-			m.highlight.OutlineColor = color
+			m.highlight.OutlineColor = Color3.new(1, 1, 1)
+			m.highlight.FillTransparency = 0
+			m.highlight.OutlineTransparency = 0
 			m.color = color
 			setNameColor(char, color)
 			return
@@ -1891,9 +1902,9 @@ do
 		hl.Name = "KINON_TargetHighlight_" .. tostring(key)
 		hl.Adornee = char
 		hl.FillColor = color
-		hl.OutlineColor = color
-		hl.FillTransparency = 0.5
-		hl.OutlineTransparency = 1
+		hl.OutlineColor = Color3.new(1, 1, 1)
+		hl.FillTransparency = 0
+		hl.OutlineTransparency = 0
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = char
 		setNameColor(char, color)
@@ -3842,8 +3853,14 @@ State.SkillCheckObj = (function()
 			if hookmetamethod then
 				local origIndex
 				origIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-					if key == "Rotation" and ActiveLine and self == ActiveLine and ActiveTargetRot and not (checkcaller and checkcaller()) then
-						return ActiveTargetRot
+					if key == "Rotation" and not (checkcaller and checkcaller()) then
+						if ActiveLine and self == ActiveLine and ActiveTargetRot then
+							return ActiveTargetRot
+						end
+						local spoofLine = State.TrapSpoofLine
+						if spoofLine and self == spoofLine and State.TrapSpoofRot then
+							return State.TrapSpoofRot
+						end
 					end
 					return origIndex(self, key)
 				end))
@@ -3851,6 +3868,7 @@ State.SkillCheckObj = (function()
 			end
 		end)
 	end
+	State.InstallRotationHook = installRotationHook
 
 	local function getPingSeconds()
 		local ping = 0.06
@@ -5823,7 +5841,7 @@ local function KINON_FindParryClient(noScan)
 		end)
 	end
 
-	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 12 and KINON_GetParryTool() then
+	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 3 and KINON_GetParryTool() then
 		KINON_ParryEngine.LastGcScan = tick()
 		local ok, objects = pcall(function() return getgc(true) end)
 		if ok and type(objects) == "table" then
@@ -5947,7 +5965,17 @@ local KINON_BusyAttrPatterns = {
 local KINON_BusyAnimKeywords = {
 	"repair","generator","unhook","rescue","hook","gate","exit","vault","window","pallet","drop",
 }
-local KINON_VaultAnimKeywords = { "vault", "window", "slide", "sliding", "mantle", "climb", "leap" }
+local KINON_VaultAnimKeywords = { "vault", "window", "slide", "sliding", "mantle" }
+
+-- Atribut "dekat / jangkauan / bisa" BUKAN sedang beraksi. Hanya flag aksi sungguhan (isRepairing, isVaulting, dst).
+local KINON_NearWords = { "near", "range", "close", "prompt", "target", "avail", "able", "hover", "focus", "detect", "touch", "inside", "within", "seen", "visible", "nearby" }
+local function KINON_IsActionFlagName(n)
+	if n:find("^can") or n:find("^has") or n:find("^allow") then return false end
+	for _, w in ipairs(KINON_NearWords) do
+		if n:find(w, 1, true) then return false end
+	end
+	return n:find("^is") ~= nil or n:find("^doing") ~= nil or n:find("^current") ~= nil or n:find("ing$") ~= nil
+end
 
 local function KINON_AttrBusy(instance)
 	local ok, attrs = pcall(function() return instance:GetAttributes() end)
@@ -5955,7 +5983,7 @@ local function KINON_AttrBusy(instance)
 	for name, value in pairs(attrs) do
 		if value == true then
 			local n = string.lower(tostring(name))
-			if not (n:find("^can") or n:find("^has") or n:find("^allow")) then
+			if KINON_IsActionFlagName(n) then
 				for _, pattern in ipairs(KINON_BusyAttrPatterns) do
 					if n:find(pattern, 1, true) then return true end
 				end
@@ -5968,7 +5996,7 @@ end
 local function KINON_IsBusyInteracting()
 	local now = tick()
 	if now < KINON_Busy.UntilTime then return true end
-	if KINON_Busy.HoldingPrompt and now - KINON_Busy.HoldSince < 15 then return true end
+	if KINON_Busy.HoldingPrompt and now - KINON_Busy.HoldSince < 6 then return true end
 	local character = LP.Character
 	if not character then return false end
 	if KINON_AttrBusy(character) or KINON_AttrBusy(LP) then return true end
@@ -6017,28 +6045,38 @@ local function KINON_IsBusyInteracting()
 	return false
 end
 
-local function KINON_TryParry(reason, killerRoot)
+local function KINON_ParryDeny(why)
+	local E = KINON_ParryEngine
+	E.LastDeny = why
+	return false
+end
+
+local function KINON_TryParry(reason, killerRoot, fast)
 	if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return false end
-	local closeNow, veryClose = false, false
+	local closeNow, veryClose, pointBlank = false, false, false
 	if killerRoot then
 		local myRoot = getRoot()
 		if myRoot then
 			local d = (killerRoot.Position - myRoot.Position).Magnitude
 			closeNow = d <= 6
 			veryClose = d <= 3
+			pointBlank = d <= 5
 		end
 	end
-	if tick() - KINON_ParryEngine.LastAttempt < (veryClose and 0.001 or (closeNow and 0.003 or 0.012)) then return false end
-	if not KINON_GetParryTool() then return false end
-	local nowBusy = tick()
-	if nowBusy - (KINON_ParryEngine.BusyAt or 0) > 0.02 then
-		KINON_ParryEngine.BusyAt = nowBusy
-		KINON_ParryEngine.BusyVal = KINON_IsBusyInteracting()
+	if not fast and tick() - KINON_ParryEngine.LastAttempt < (veryClose and 0.001 or (closeNow and 0.003 or 0.012)) then return false end
+	if not KINON_GetParryTool() then return KINON_ParryDeny("parry dagger tidak ditemukan") end
+	-- killer menempel (<= 5 stud): jangan tahan parry karena flag "sedang interaksi"
+	if not pointBlank then
+		local nowBusy = tick()
+		if nowBusy - (KINON_ParryEngine.BusyAt or 0) > 0.04 then
+			KINON_ParryEngine.BusyAt = nowBusy
+			KINON_ParryEngine.BusyVal = KINON_IsBusyInteracting()
+		end
+		if KINON_ParryEngine.BusyVal then return KINON_ParryDeny("kamu sedang interaksi (vault/gen/dll)") end
 	end
-	if KINON_ParryEngine.BusyVal then return false end
 
 	local character = LP.Character
-	if KINON_SafetyOn() and not KINON_SafeToParry(character) then return false end
+	if not pointBlank and KINON_SafetyOn() and not KINON_SafeToParry(character) then return KINON_ParryDeny("Safety Parry aktif") end
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not character or not humanoid or humanoid.Health <= 0 then return false end
 	if character:GetAttribute("Knocked") == true or LP:GetAttribute("Knocked") == true
@@ -6060,15 +6098,15 @@ local function KINON_TryParry(reason, killerRoot)
 				end
 			end)
 		end
-		return false
+		return KINON_ParryDeny("parry cooldown")
 	else
 		KINON_ParryEngine.CooldownStuckSince = nil
 	end
-	if client and client.isParryResolving then return false end
+	if client and client.isParryResolving then return KINON_ParryDeny("parry sedang resolving") end
 	-- cek tambahan dari ParryClient sendiri (CanUse = false saat dagger belum siap)
 	if client and type(client.CanUse) == "function" then
 		local okUse, canUse = pcall(client.CanUse, client)
-		if okUse and canUse == false then return false end
+		if okUse and canUse == false then return KINON_ParryDeny("dagger belum siap (CanUse=false)") end
 	end
 	-- kunci lokal: flag cooldown game bisa telat menyala, jadi setelah parry berhasil
 	-- jangan panggil lagi sebentar walau flag belum terbaca
@@ -6093,15 +6131,7 @@ local function KINON_TryParry(reason, killerRoot)
 	local fallbackOk, fallbackFired = pcall(KINON_TryFallbackParry)
 	if fallbackOk and fallbackFired then
 		KINON_ParryEngine.LastSuccess = tick()
-		if not KINON_ParryEngine.WarnedFallback then
-			KINON_ParryEngine.WarnedFallback = true
-			warn("[KINON Auto Parry] Using GUI/tool fallback; ParryClient instance was not available yet.")
-		end
 		return true
-	end
-	if not KINON_ParryEngine.WarnedFallback then
-		KINON_ParryEngine.WarnedFallback = true
-		warn("[KINON Auto Parry] Attack detected, but no active ParryClient or usable game parry button was found.")
 	end
 	return false
 end
@@ -6151,7 +6181,7 @@ local function KINON_KillerDoingObjectAction(model, currentTrack)
 		for name, value in pairs(attrs) do
 			if value == true then
 				local n = string.lower(tostring(name))
-				if not (n:find("^can") or n:find("^has") or n:find("^allow")) then
+				if KINON_IsActionFlagName(n) or n:find("^is") then
 					for _, word in ipairs(KINON_KillerAttrWords) do
 						if n:find(word, 1, true) then return true end
 					end
@@ -6182,6 +6212,17 @@ local function KINON_KillerDoingObjectAction(model, currentTrack)
 	return false
 end
 
+local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge)
+	-- V1 aktif -> pakai V1, selain itu V2. Error di V2 tidak lagi diam-diam: dicatat dan jatuh ke cek V1.
+	if Parry.Enabled then
+		return KINON_InRangeAndFacing(killerRoot, playerRoot)
+	end
+	local ok, res = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, nil, vel, isLunge)
+	if ok then return res == true end
+	local d = (killerRoot.Position - playerRoot.Position).Magnitude
+	return d <= (tonumber(ParryV2.Range) or 14) + 2
+end
+
 local function KINON_HandleAttackTrack(animTrack, model)
 	if not (Parry.Enabled or ParryV2.Enabled) or not animTrack or not model or not model.Parent then return end
 	local animationId = KINON_AnimationId(animTrack)
@@ -6206,34 +6247,37 @@ local function KINON_HandleAttackTrack(animTrack, model)
 	if not knownAttack then return end
 	if KINON_LabelIsNonAttack(KINON_TrackLabel(animTrack)) then return end
 
+	-- killer menempel: animasi bisa sudah berjalan lama saat sampai ke client (ping), jadi jendela waktunya dilonggarkan
+	local function timeLimit(killerRootX)
+		local myR = getRoot()
+		if killerRootX and myR and (killerRootX.Position - myR.Position).Magnitude <= 6 then return 0.85 end
+		return 0.45
+	end
 	local okTime, timePosition = pcall(function() return animTrack.TimePosition or 0 end)
-	if okTime and timePosition > 0.45 then return end
+	if okTime and timePosition > timeLimit(model:FindFirstChild("HumanoidRootPart")) then return end
 
 	do
 		local playerRoot0 = getRoot()
 		local killerRoot0 = model:FindFirstChild("HumanoidRootPart")
 		if playerRoot0 and killerRoot0 then
-			local pass0 = false
-			if Parry.Enabled then
-				pass0 = KINON_InRangeAndFacing(killerRoot0, playerRoot0)
-			elseif ParryV2.Enabled then
-				pass0 = KINON_InRangeAndFacingV2(killerRoot0, playerRoot0, nil, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true)
-			end
-			if pass0 and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
-			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0) then return end
+			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true)
+			if pass0 and (killerRoot0.Position - playerRoot0.Position).Magnitude > 5
+				and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
+			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0, true) then return end
 		end
 	end
 
 	task.spawn(function()
 		local startTime = tick()
 		local lastPos, lastT, vel
+		local firstPass = true
 		repeat
 			if unloaded or not (Parry.Enabled or ParryV2.Enabled) or not animTrack.IsPlaying then break end
 			local currentTime = 0
 			pcall(function() currentTime = animTrack.TimePosition or 0 end)
-			if currentTime > 0.45 then break end
 			local playerRoot = getRoot()
 			local killerRoot = model:FindFirstChild("HumanoidRootPart")
+			if currentTime > timeLimit(killerRoot) then break end
 			if killerRoot then
 				local nowT = tick()
 				local pos = killerRoot.Position
@@ -6244,19 +6288,19 @@ local function KINON_HandleAttackTrack(animTrack, model)
 				lastPos, lastT = pos, nowT
 			end
 			if playerRoot and killerRoot then
-				local pass = false
-				if Parry.Enabled then
-					pass = KINON_InRangeAndFacing(killerRoot, playerRoot)
-				elseif ParryV2.Enabled then
-					pass = KINON_InRangeAndFacingV2(killerRoot, playerRoot, nil, vel, KINON_LungeAnimationIds[animationId] == true)
-				end
-				if pass and KINON_KillerDoingObjectAction(model, animTrack) then
+				local pass = KINON_ParryInRange(killerRoot, playerRoot, vel, KINON_LungeAnimationIds[animationId] == true)
+				if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 5
+					and KINON_KillerDoingObjectAction(model, animTrack) then
 					pass = false
 				end
-				if pass and KINON_TryParry("Animation " .. animationId, killerRoot) then return end
+				if pass then
+					local wasFirst = firstPass
+					firstPass = false
+					if KINON_TryParry("Animation " .. animationId, killerRoot, wasFirst) then return end
+				end
 			end
 			RunService.PreSimulation:Wait()
-		until tick() - startTime >= 0.45
+		until tick() - startTime >= 0.85
 	end)
 end
 
@@ -9562,62 +9606,119 @@ do
 	local T = State.SkillCheckTrap
 	local conn
 	local busy = false
+	local lastPrompt, promptStart = nil, 0
+
 	local function trapFire()
 		local o = State.SkillCheckObj
 		if o then o:_fireAction(0.01) end
 	end
 
-	local function inRange(lineRot, goalRot)
-		local a = (goalRot + 102) % 360
-		local b = (goalRot + 116) % 360
-		if a > b then return lineRot >= a or lineRot <= b end
-		return lineRot >= a and lineRot <= b
+	local function pingSec()
+		local p = 0.08
+		pcall(function() p = LP:GetNetworkPing() end)
+		if type(p) ~= "number" or p ~= p then p = 0.08 end
+		return math.clamp(p, 0.01, 0.5)
 	end
+
+	local function inWindow(lr, startRot, endRot)
+		if startRot > endRot then return lr >= startRot or lr <= endRot end
+		return lr >= startRot and lr <= endRot
+	end
+
 	local function step()
 		if unloaded or not T.On or busy then return end
 		local pg = LP:FindFirstChildOfClass("PlayerGui")
 		if not pg then return end
+		local check
 		for _, name in ipairs({ "SkillCheckPromptGui", "SkillCheckPromptGui-con" }) do
 			local prompt = pg:FindFirstChild(name)
 			if prompt and prompt.Enabled ~= false then
-				local check = prompt:FindFirstChild("Check")
-				if check and check.Visible then
-					local line = check:FindFirstChild("Line")
-					if not line then return end
-					local target
-					for _, tn in ipairs({ "TrapPerfect", "TrapGoal" }) do
-						local c = check:FindFirstChild(tn)
-						if c and c.Visible then target = c; break end
-					end
-					if not target then return end
+				local c = prompt:FindFirstChild("Check")
+				if c and c.Visible then check = c; break end
+			end
+		end
+		if not check then
+			lastPrompt = nil
+			State.TrapSpoofLine, State.TrapSpoofRot = nil, nil
+			return
+		end
+		local line = check:FindFirstChild("Line") or check:FindFirstChild("line")
+		if not line then return end
 
-					local instant = T.Mode == "Instant"
-					local shouldPress = false
-					if instant then
-						-- Align the local marker with the trap's hit window before sending input.
-						line.Rotation = target.Rotation + 109
-						shouldPress = true
-					else
-						shouldPress = inRange(line.Rotation % 360, target.Rotation % 360)
-					end
+		local trapGoal = check:FindFirstChild("TrapGoal") or check:FindFirstChild("trapGoal")
+		local trapPerfect = check:FindFirstChild("TrapPerfect") or check:FindFirstChild("trapPerfect")
+		local char = LP.Character
+		local trapped = char and (char:GetAttribute("Trapped") == true or char:GetAttribute("EscapingTrap") == true)
+		local isTrap = (trapGoal and trapGoal.Visible) or (trapPerfect and trapPerfect.Visible) or trapped
+		if not isTrap then return end
 
-					if shouldPress then
-						busy = true
-						task.spawn(function()
-							pcall(trapFire)
-							task.wait(instant and 0.2 or 0.05)
-							busy = false
-						end)
-					end
-					return
+		if check ~= lastPrompt then
+			lastPrompt = check
+			promptStart = os.clock()
+		end
+
+		local targetRot, zoneStart, zoneEnd
+		if trapGoal and trapGoal.Visible then
+			targetRot = (trapGoal.Rotation + 109) % 360
+			zoneStart = (trapGoal.Rotation + 104) % 360
+			zoneEnd = (trapGoal.Rotation + 115) % 360
+		elseif trapPerfect and trapPerfect.Visible then
+			targetRot = trapPerfect.Rotation % 360
+			zoneStart = (trapPerfect.Rotation - 5) % 360
+			zoneEnd = (trapPerfect.Rotation + 15) % 360
+		else
+			local goal = check:FindFirstChild("Goal") or check:FindFirstChild("goal")
+			local gr = goal and goal.Rotation or 0
+			targetRot = (gr + 109) % 360
+			zoneStart = (gr + 104) % 360
+			zoneEnd = (gr + 115) % 360
+		end
+
+		local ping = pingSec()
+		if T.Mode == "Instant" then
+			local minWait = math.clamp(0.08 + ping * 0.4, 0.10, 0.18)
+			if os.clock() - promptStart < minWait then return end
+			busy = true
+			if State.InstallRotationHook then pcall(State.InstallRotationHook) end
+			State.TrapSpoofLine, State.TrapSpoofRot = line, targetRot
+			line.Rotation = targetRot
+			task.spawn(function()
+				local lockActive = true
+				local lockConn = RunService.RenderStepped:Connect(function()
+					if lockActive and line and line.Parent then line.Rotation = targetRot end
+				end)
+				for _ = 1, 2 do
+					line.Rotation = targetRot
+					RunService.Heartbeat:Wait()
 				end
+				pcall(trapFire)
+				task.wait(0.10)
+				lockActive = false
+				if lockConn then lockConn:Disconnect() end
+				task.wait(0.15)
+				State.TrapSpoofLine, State.TrapSpoofRot = nil, nil
+				busy = false
+			end)
+		else
+			local lead = math.clamp(ping * 100, 4, 16)
+			local lr = line.Rotation % 360
+			local sR = (zoneStart - lead) % 360
+			if inWindow(lr, sR, zoneEnd) then
+				busy = true
+				task.spawn(function()
+					pcall(trapFire)
+					task.wait(0.2)
+					busy = false
+				end)
 			end
 		end
 	end
+
 	State.TrapSkillSet = function(v)
 		T.On = v == true
 		if conn then conn:Disconnect(); conn = nil end
 		busy = false
+		State.TrapSpoofLine, State.TrapSpoofRot = nil, nil
 		if T.On then conn = RunService.RenderStepped:Connect(function() pcall(step) end) end
 	end
 end
@@ -11245,8 +11346,8 @@ State.Utilities = {
 	AntiBlindFlashlightK = false, DashLockK = false, AimlockAttackK = false, NoSlowDown = false,
 	AutoRun = false,
 	AlwaysFastVaultS = false, UnlimitedVaultS = false,
-	AutoDodgeAbyssS = false,
-	VaultSpeedS = false, FlowstateS = false, VaultSpeed = 13, FlowstateCD = false, FlowstateDelay = 5,
+	AutoDodgeAbyssS = false, AbyssDodgeRange = 40, FlowstateS = false,
+	VaultSpeedS = false, VaultSpeed = 13,
 	FastBreakPalletK = false, PalletBreakMult = 5,
 	AutoStalkK = false, AutoStalkRange = 150,
 	SelfHealAllS = false, HealThreshold = 90,
@@ -11259,17 +11360,30 @@ State.UtilitiesK = { Enabled = false }
 State.UtilGroup = {
 	NoSlowDown = "Utilities", AutoRun = "Utilities",
 	AntiBlindFlashlightK = "UtilitiesK", DashLockK = "UtilitiesK", AimlockAttackK = "UtilitiesK",
-	AlwaysFastVaultS = "UtilitiesS",
+	AlwaysFastVaultS = "UtilitiesS", FlowstateS = "UtilitiesS",
 	UnlimitedVaultS = "UtilitiesS", AutoDodgeAbyssS = "UtilitiesS",
-	VaultSpeedS = "UtilitiesS", FlowstateS = "UtilitiesS",
+	VaultSpeedS = "UtilitiesS",
 	FastBreakPalletK = "UtilitiesK", AutoStalkK = "UtilitiesK",
 	SelfHealAllS = "UtilitiesS",
 }
+local function currentRole()
+	local team = LP.Team and string.lower(LP.Team.Name) or ""
+	local char = LP.Character
+	if team:find("killer", 1, true) or (char and char:GetAttribute("MorphedKiller")) then return "killer" end
+	if team:find("survivor", 1, true) then return "survivor" end
+	return "none"
+end
+State.CurrentRole = currentRole
+
 local function applyUtilities()
 	local u = State.Utilities
+	local role = currentRole()
 	for key, handler in pairs(State.UtilityHandlers) do
-		local g = State[State.UtilGroup[key] or "Utilities"]
+		local groupName = State.UtilGroup[key] or "Utilities"
+		local g = State[groupName]
 		local want = g.Enabled == true and u[key] == true
+		if want and groupName == "UtilitiesK" and role ~= "killer" then want = false end
+		if want and groupName == "UtilitiesS" and role ~= "survivor" then want = false end
 		if (State.UtilApplied[key] or false) ~= want then
 			State.UtilApplied[key] = want
 			pcall(handler, want)
@@ -11279,6 +11393,12 @@ end
 Hooks.Utilities = applyUtilities
 Hooks.UtilitiesS = applyUtilities
 Hooks.UtilitiesK = applyUtilities
+task.spawn(function()
+	while not unloaded do
+		task.wait(1.5)
+		pcall(applyUtilities)
+	end
+end)
 
 do
 	local Lighting = game:GetService("Lighting")
@@ -11472,45 +11592,37 @@ do
 		end
 	end
 
-	local flowChar, flowSig, flowAdded
-	local flowToken = 0
-	local function flowDelay()
-		if U.FlowstateCD == true then
-			return math.clamp(tonumber(U.FlowstateDelay) or 5, 1, 30)
-		end
-		return 0.05
-	end
+end
+do
+	-- Flowstate No CD
+	local U = State.Utilities
+	-- Flowstate No CD: atribut Flowstate dijaga selalu true
+	local flowConns = {}
 	local function flowClear()
-		if flowSig then flowSig:Disconnect(); flowSig = nil end
-		if flowAdded then flowAdded:Disconnect(); flowAdded = nil end
-		flowToken = flowToken + 1
+		for _, c in ipairs(flowConns) do pcall(function() c:Disconnect() end) end
+		table.clear(flowConns)
 	end
-	local function flowApply(char)
+	local function flowHook(char)
 		if not char then return end
-		if flowSig then flowSig:Disconnect(); flowSig = nil end
-		flowChar = char
-		pcall(function() char:SetAttribute("Flowstate", true) end)
-		flowSig = char:GetAttributeChangedSignal("Flowstate"):Connect(function()
-			if char:GetAttribute("Flowstate") ~= false then return end
-			flowToken = flowToken + 1
-			local my = flowToken
-			task.delay(flowDelay(), function()
-				if my ~= flowToken or unloaded then return end
-				if char.Parent and flowChar == char and flowSig then
-					pcall(function() char:SetAttribute("Flowstate", true) end)
-				end
-			end)
-		end)
+		pcall(function() if char:GetAttribute("Flowstate") ~= true then char:SetAttribute("Flowstate", true) end end)
+		table.insert(flowConns, char:GetAttributeChangedSignal("Flowstate"):Connect(function()
+			if char:GetAttribute("Flowstate") ~= true then
+				task.defer(function()
+					if char and char.Parent and not unloaded and #flowConns > 0 then
+						pcall(function() char:SetAttribute("Flowstate", true) end)
+					end
+				end)
+			end
+		end))
 	end
-
-	State.UtilityHandlers.FlowstateS = function(state)
+	State.UtilityHandlers.FlowstateS = function(on)
 		flowClear()
-		if state then
-			flowApply(LP.Character)
-			flowAdded = LP.CharacterAdded:Connect(function(char)
+		if on then
+			flowHook(LP.Character)
+			table.insert(flowConns, LP.CharacterAdded:Connect(function(char)
 				task.wait(1)
-				flowApply(char)
-			end)
+				flowHook(char)
+			end))
 		else
 			local char = LP.Character
 			if char then pcall(function() char:SetAttribute("Flowstate", false) end) end
@@ -11587,16 +11699,18 @@ do
 	local function hookAttackButton(obj)
 		if not obj:IsA("GuiButton") then return end
 		if obj:IsDescendantOf(Gui) then return end
+		if obj:FindFirstAncestor("Survivor-mob") or obj:FindFirstAncestor("Survivor") then return end
 		local n = string.lower(obj.Name)
 		if string.find(n, "attack", 1, true) or string.find(n, "hit", 1, true)
 			or string.find(n, "slash", 1, true) or string.find(n, "swing", 1, true) then
 			obj.InputBegan:Connect(function(input)
+				if not State.IsKillerNow() then return end
 				if input.UserInputType == Enum.UserInputType.Touch
 					or input.UserInputType == Enum.UserInputType.MouseButton1 then
 					attackInput, attackAt = input, os.clock()
 				end
 			end)
-			obj.TouchTap:Connect(function() tapUntil = os.clock() + 0.25 end)
+			obj.TouchTap:Connect(function() if State.IsKillerNow() then tapUntil = os.clock() + 0.25 end end)
 		end
 	end
 
@@ -11616,14 +11730,14 @@ do
 		if unloaded then return end
 		local cam = workspace.CurrentCamera
 		if not cam then return end
-		if flags.dash and dashActive then
+		if flags.dash and dashActive and State.IsKillerNow() then
 			local radius = tonumber(U.DashRadius) or 50
 			if not targetValid(dashTarget, radius * 1.3) then dashTarget = closestWithin(radius) end
 			if dashTarget then cam.CFrame = CFrame.new(cam.CFrame.Position, dashTarget.Position) end
 		else
 			dashTarget = nil
 		end
-		if flags.aim and LP.Team and LP.Team.Name == "Killer" and attackHeld() then
+		if flags.aim and State.IsKillerNow() and attackHeld() then
 			local radius = tonumber(U.AimRadius) or 50
 			if not targetValid(aimTarget, radius * 1.3) then aimTarget = closestWithin(radius) end
 			if aimTarget then cam.CFrame = CFrame.new(cam.CFrame.Position, aimTarget.Position) end
@@ -11672,7 +11786,30 @@ do
 		local origAttrs = {}
 		local BREAK_ATTRS = { "breakspeed", "PalletBreakSpeed", "InteractSpeed", "ActionSpeed" }
 		local PALLET_WORDS = { "pallet", "break", "kick" }
-		local OTHER_WORDS = { "heal", "repair", "generator", "vault", "window", "unhook", "hook", "gate", "carry", "pickup", "grab", "sabotage", "stalk" }
+		local OTHER_WORDS = { "heal", "repair", "generator", "gen", "damage", "vault", "window", "unhook", "hook", "gate", "carry", "pickup", "grab", "sabotage", "stalk" }
+		local genCache, genCacheAt = {}, 0
+		local function nearGenerator(char)
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if not root then return false end
+			if os.clock() - genCacheAt > 3 then
+				genCacheAt = os.clock()
+				genCache = {}
+				pcall(function()
+					for _, d in ipairs(workspace:GetDescendants()) do
+						if d:IsA("Model") and string.lower(d.Name) == "generator" then
+							genCache[#genCache + 1] = d
+						end
+					end
+				end)
+			end
+			for _, g in ipairs(genCache) do
+				if g.Parent then
+					local ok, pos = pcall(function() return g:GetPivot().Position end)
+					if ok and pos and (pos - root.Position).Magnitude <= 9 then return true end
+				end
+			end
+			return false
+		end
 		local palletCache, palletCacheAt = {}, 0
 		local function nearPallet(char)
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -11751,14 +11888,24 @@ do
 			breakConn = RunService.Heartbeat:Connect(function()
 				local char = LP.Character
 				if not char then return end
-				local isKiller = char:GetAttribute("IsKiller")
-					or (LP.Team and string.find(string.lower(LP.Team.Name), "killer", 1, true))
-				if not isKiller then return end
+				-- hanya killer: sebagai survivor tidak mengirim / mengubah apa pun
+				local teamName = LP.Team and string.lower(LP.Team.Name) or ""
+				local isKiller = (char:GetAttribute("IsKiller") == true or teamName:find("killer", 1, true) ~= nil)
+					and not teamName:find("survivor", 1, true)
+				if not isKiller then
+					if next(origAttrs) ~= nil then table.clear(origAttrs) end
+					return
+				end
 
 				local ci = char:FindFirstChild("CheckInterractable")
 				local action = ci and (ci:GetAttribute("action") or ci:GetAttribute("Action"))
 				local actionLower = action and string.lower(tostring(action)) or ""
 				local actionIsPallet = isPalletAction(action)
+				if actionIsPallet then
+					for _, w in ipairs(OTHER_WORDS) do
+						if actionLower:find(w, 1, true) then actionIsPallet = false; break end
+					end
+				end
 
 				local hum = char:FindFirstChildOfClass("Humanoid")
 				local animator = hum and hum:FindFirstChildOfClass("Animator")
@@ -11783,6 +11930,9 @@ do
 					if isImmobile and (animIsPallet or nearPallet(char)) then
 						shouldBoost = true
 					end
+				end
+				if shouldBoost and (not nearPallet(char) or (nearGenerator(char) and not animIsPallet and not actionIsPallet)) then
+					shouldBoost = false
 				end
 
 				if not shouldBoost then
@@ -11835,7 +11985,6 @@ end
 do
 	local ReplicatedStorage = game:GetService("ReplicatedStorage")
 	local ABYSS_ANIMATION_ID = "100014992013740"
-	local TRIGGER_RANGE = 40
 	local CROUCH_HOLD = 1.2
 
 	local conns = {}
@@ -11904,7 +12053,7 @@ do
 
 			local myRoot = myChar:FindFirstChild("HumanoidRootPart")
 			local killerRoot = killerChar and killerChar:FindFirstChild("HumanoidRootPart")
-			if myRoot and killerRoot and (myRoot.Position - killerRoot.Position).Magnitude <= TRIGGER_RANGE then
+			if myRoot and killerRoot and (myRoot.Position - killerRoot.Position).Magnitude <= math.clamp(tonumber(State.Utilities.AbyssDodgeRange) or 40, 10, 150) then
 				triggerCrouch()
 			end
 		end)
@@ -12277,15 +12426,14 @@ do
 	util(surv, "Always Fast Vault", "zap", "AlwaysFastVaultS")
 	util(surv, "Unlimited Vault", "infinity", "UnlimitedVaultS")
 	util(surv, "Auto Dodge Abyss", "shield", "AutoDodgeAbyssS")
+	addSlider(surv, "Abyss Dodge Range", "ruler", 10, 150,
+		function() return math.clamp(math.floor(tonumber(s.AbyssDodgeRange) or 40), 10, 150) end,
+		function(v) s.AbyssDodgeRange = v end)
 	util(surv, "Vault & Slide Speed", "zap", "VaultSpeedS")
 	addSlider(surv, "Vault & Slide Speed Level", "gauge", 10, 20,
 		function() return math.clamp(math.floor(tonumber(s.VaultSpeed) or 13), 10, 20) end,
 		function(v) s.VaultSpeed = v end)
 	util(surv, "Flowstate (No CD)", "zap", "FlowstateS")
-	util(surv, "Flowstate With Cooldown", "timer", "FlowstateCD")
-	addSlider(surv, "Flowstate Cooldown (s)", "timer", 1, 30,
-		function() return math.clamp(math.floor(tonumber(s.FlowstateDelay) or 5), 1, 30) end,
-		function(v) s.FlowstateDelay = v end)
 	util(surv, "Heal Aura", "shield", "SelfHealAllS")
 
 	local kill = addCard(10, "wrench", "Killer Utilities", "", "UtilitiesK")
