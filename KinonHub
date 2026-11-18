@@ -1033,6 +1033,7 @@ State.SpearObj = (function()
 	V.Enabled, V.UseDeep = false, false
 	V.FOV, V.MaxRange, V.FovAim = 240, 320, true
 	V.SpearSpeed, V.Drop, V.Predict = 180, 0.5, true
+	V.AimPart = "Auto"
 	V.Dead = false
 	V.CurPart, V.CurPoint, V.CurOrigin = nil, nil, nil
 	V.TargetChar = nil
@@ -1313,7 +1314,14 @@ State.SpearObj = (function()
 		local latency = getPingHalf() + 0.03 + 0.06 * math.clamp((dist - 40) / 160, 0, 1)
 		local leadMul = 1.4 - 0.55 * farLead
 		local aimPoint = hrp.Position + Vector3.new(0, 0.2, 0)
-		if dist > 100 then
+		local pickPart = V.AimPart
+		if pickPart == "Head" then
+			local head = targetChar:FindFirstChild("Head")
+			if head and head:IsA("BasePart") then aimPoint = head.Position end
+		elseif pickPart == "UpperTorso" then
+			local tor = targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Torso")
+			if tor and tor:IsA("BasePart") then aimPoint = tor.Position end
+		elseif pickPart ~= "HumanoidRootPart" and dist > 100 then
 			local head = targetChar:FindFirstChild("Head")
 			if head and head:IsA("BasePart") then aimPoint = head.Position end
 		end
@@ -2207,6 +2215,14 @@ State.SilentObj = (function()
 	end
 
 	local function targetPart(ch)
+		local pick = T.AimPart
+		if pick == "Head" then
+			local h = ch:FindFirstChild("Head")
+			if h then return h end
+		elseif pick == "HumanoidRootPart" then
+			local r = ch:FindFirstChild("HumanoidRootPart")
+			if r then return r end
+		end
 		return ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso") or ch:FindFirstChild("HumanoidRootPart")
 	end
 
@@ -2264,7 +2280,7 @@ State.SilentObj = (function()
 	local function latencyLead()
 		local ok, ping = pcall(function() return LP:GetNetworkPing() end)
 		local rtt = (ok and type(ping) == "number" and ping > 0) and math.clamp(ping, 0.02, 0.4) or 0.08
-		return (rtt + INTERP_DELAY) * 0.6
+		return (rtt + INTERP_DELAY) * 0.8
 	end
 
 	track(RunService.Heartbeat:Connect(function()
@@ -2342,9 +2358,9 @@ State.SilentObj = (function()
 
 	local function zigzagPoint(part, from)
 		local list = history[part]
-		if not list or #list < 18 then return nil end
+		if not list or #list < 12 then return nil end
 		local tn = list[#list].t
-		if tn - list[1].t < 0.8 then return nil end
+		if tn - list[1].t < 0.6 then return nil end
 		local slope3, center = State.Motion.Regress(list, tn, 1.2, 0.6)
 		if not slope3 then return nil end
 		local res = zzResiduals(list, tn, function(t) return center + slope3 * (t - tn) end)
@@ -2354,7 +2370,7 @@ State.SilentObj = (function()
 			if m > bestMag then best, bestMag = res[i].r, m end
 		end
 		local t0 = (center - from).Magnitude / PROJ_SPEED + latencyLead()
-		if not best or bestMag < 0.6 or #res < 12 then return nil end
+		if not best or bestMag < 0.5 or #res < 9 then return nil end
 		local u = best.Unit
 		local cross = zzCross(res, u)
 		if #cross < 4 then return nil end
@@ -2382,11 +2398,11 @@ State.SilentObj = (function()
 		end
 		local H = hsum / #halves
 		local base = Vector3.new(cNow.X, list[#list].p.Y, cNow.Z) + drift * t0
-		if H < 0.12 or H > 0.7 then return nil end
+		if H < 0.1 or H > 0.8 then return nil end
 		local var = 0
 		for _, h in ipairs(halves) do var = var + (h - H) * (h - H) end
 		local conf = math.clamp(1 - (math.sqrt(var / #halves) / H) / 0.35, 0, 1)
-		if conf <= 0.15 then return nil end
+		if conf <= 0.1 then return nil end
 		local ampSum, ampN = 0, 0
 		for i = 2, #amps2 do ampSum, ampN = ampSum + amps2[i], ampN + 1 end
 		local A = ampN > 0 and ampSum / ampN or bestMag
@@ -2426,7 +2442,7 @@ State.SilentObj = (function()
 		if vel.Magnitude < 1 then return pos end
 		local lat = latencyLead()
 		local _, acc = State.Motion.Estimate(history[part])
-		acc = acc and flat(acc) * 0.6 or Vector3.zero
+		acc = acc and flat(acc) * 0.8 or Vector3.zero
 		local t = (pos - from).Magnitude / PROJ_SPEED + lat
 		local predicted = pos
 		for _ = 1, 3 do
@@ -2438,7 +2454,7 @@ State.SilentObj = (function()
 		end
 		local scale = math.clamp((tonumber(T.LeadScale) or 100) / 100, 0.3, 3)
 		local offset = (predicted - pos) * scale
-		if offset.Magnitude > 22 then offset = offset.Unit * 22 end
+		if offset.Magnitude > 30 then offset = offset.Unit * 30 end
 		return pos + offset
 	end
 
@@ -6136,11 +6152,12 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	return false
 end
 
-local function KINON_InRangeAndFacing(killerRoot, playerRoot)
+local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, isLunge)
 	if not killerRoot or not playerRoot then return false end
-	local distance = (killerRoot.Position - playerRoot.Position).Magnitude
+	local distance = ((positionOverride or killerRoot.Position) - playerRoot.Position).Magnitude
 	local range = math.clamp(tonumber(Parry.Range) or 14, 5, 35)
 		+ math.clamp(tonumber(Parry.ReachBonus) or 0, 0, 10)
+	if isLunge then range = math.max(range, 20) end
 	if distance > range then return false end
 	if not KINON_ShouldPassFaceCheck(killerRoot, playerRoot) then return false end
 	return true
@@ -6214,11 +6231,27 @@ end
 
 local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge)
 	-- V1 aktif -> pakai V1, selain itu V2. Error di V2 tidak lagi diam-diam: dicatat dan jatuh ke cek V1.
+	local lead = 0.12
+	pcall(function() lead = math.clamp(LP:GetNetworkPing() + 0.06, 0.08, 0.3) end)
+	local predicted
+	if vel and typeof(vel) == "Vector3" and vel.Magnitude > 4 then
+		local toMe = playerRoot.Position - killerRoot.Position
+		if toMe.Magnitude > 0.001 and vel:Dot(toMe.Unit) > 2 then
+			predicted = killerRoot.Position + vel * lead
+		end
+	end
 	if Parry.Enabled then
-		return KINON_InRangeAndFacing(killerRoot, playerRoot)
+		if KINON_InRangeAndFacing(killerRoot, playerRoot, nil, isLunge) then return true end
+		if predicted and KINON_InRangeAndFacing(killerRoot, playerRoot, predicted, isLunge) then return true end
+		return false
 	end
 	local ok, res = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, nil, vel, isLunge)
-	if ok then return res == true end
+	if ok and res == true then return true end
+	if ok and predicted then
+		local ok2, res2 = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, predicted, vel, isLunge)
+		if ok2 and res2 == true then return true end
+	end
+	if ok then return false end
 	local d = (killerRoot.Position - playerRoot.Position).Magnitude
 	return d <= (tonumber(ParryV2.Range) or 14) + 2
 end
@@ -6320,9 +6353,25 @@ local function KINON_HookAnimator(animator, model)
 	end)
 end
 
+local function KINON_EarlyAttack(model, isLunge)
+	if not (Parry.Enabled or ParryV2.Enabled) or not model or not model.Parent then return end
+	local killerRoot = model:FindFirstChild("HumanoidRootPart")
+	local playerRoot = getRoot()
+	if not killerRoot or not playerRoot then return end
+	local pass = KINON_ParryInRange(killerRoot, playerRoot, killerRoot.AssemblyLinearVelocity, isLunge == true)
+	if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 5
+		and KINON_KillerDoingObjectAction(model, nil) then pass = false end
+	if pass then KINON_TryParry("Early", killerRoot, true) end
+end
+
 local function KINON_HookKillerModel(model)
 	if not model or KINON_ParryEngine.SeenModels[model] then return end
 	KINON_ParryEngine.SeenModels[model] = true
+	track(model.AttributeChanged:Connect(function(attr)
+		if (attr == "isAttacking" or attr == "isLunging") and model:GetAttribute(attr) == true then
+			pcall(KINON_EarlyAttack, model, attr == "isLunging")
+		end
+	end))
 	local function hookChild(child)
 		if child:IsA("Humanoid") then
 			local animator = child:FindFirstChildOfClass("Animator")
@@ -6381,6 +6430,33 @@ task.spawn(function()
 			task.wait(0.1)
 		else
 			task.wait(0.35)
+		end
+	end
+end)
+
+task.spawn(function()
+	local rs = game:GetService("ReplicatedStorage")
+	local remotes = rs:WaitForChild("Remotes", 20)
+	local atks = remotes and remotes:WaitForChild("Attacks", 20)
+	if not atks then return end
+	local function onAttack(isLunge)
+		if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return end
+		local myRoot = getRoot()
+		if not myRoot then return end
+		local best, bestD = nil, 1e9
+		for _, model in ipairs(KINON_GetKillerModels()) do
+			local r = model:FindFirstChild("HumanoidRootPart")
+			if r then
+				local d = (r.Position - myRoot.Position).Magnitude
+				if d < bestD then best, bestD = model, d end
+			end
+		end
+		if best then pcall(KINON_EarlyAttack, best, isLunge) end
+	end
+	for name, lunge in pairs({ BasicAttack = false, Lunge = true }) do
+		local rem = atks:FindFirstChild(name)
+		if rem and rem:IsA("RemoteEvent") then
+			track(rem.OnClientEvent:Connect(function() onAttack(lunge) end))
 		end
 	end
 end)
@@ -9758,6 +9834,10 @@ do
 	addCheckbox(card, "Predict Spear", "crosshair",
 		function() return s.Predict ~= false end,
 		function(v) s.Predict = v end)
+	addDropdown(card, "Aim Target", "user", { "Auto", "Head", "UpperTorso", "HumanoidRootPart" },
+		function(v) return v end,
+		function() return s.AimPart or "Auto" end,
+		function(v) s.AimPart = v end)
 	addSlider(card, "FOV (px)", "circle", 40, 600,
 		function() return math.clamp(math.floor(tonumber(s.FOV) or 240), 40, 600) end,
 		function(v) s.FOV = v; sync() end)
@@ -11066,15 +11146,17 @@ State.VeilLineObj = (function()
 		local terrain = workspace.Terrain
 		local e = { segs = {} }
 		for i = 1, MAX_STEPS do
-			local l = Instance.new("LineHandleAdornment")
-			l.Adornee = terrain
-			l.AlwaysOnTop = true
-			l.ZIndex = 5
-			l.Color3 = LINE_COLOR
+			local l = Instance.new("Part")
+			l.Name = "KinonVeilSeg"
+			l.Anchored = true
+			l.CanCollide = false
+			l.CanQuery = false
+			l.CanTouch = false
+			l.CastShadow = false
+			l.Material = Enum.Material.Neon
+			l.Color = LINE_COLOR
 			l.Transparency = 0.15
-			l.Thickness = 3
-			l.Visible = false
-			l.Parent = parent
+			l.Size = Vector3.new(0.12, 0.12, 1)
 			e.segs[i] = l
 		end
 		local d = Instance.new("CylinderHandleAdornment")
@@ -11092,7 +11174,7 @@ State.VeilLineObj = (function()
 	end
 
 	local function hideEntry(e)
-		for _, l in ipairs(e.segs) do l.Visible = false end
+		for _, l in ipairs(e.segs) do if l.Parent then l.Parent = nil end end
 		e.dot.Visible = false
 	end
 
@@ -11135,6 +11217,72 @@ State.VeilLineObj = (function()
 		return nil
 	end
 
+	local ATTACK_HIDE = 0.6
+
+	local wepState = setmetatable({}, { __mode = "k" })
+
+	task.spawn(function()
+		local rs = game:GetService("ReplicatedStorage")
+		local remotes = rs:WaitForChild("Remotes", 20)
+		local killers = remotes and remotes:WaitForChild("Killers", 20)
+		local veil = killers and killers:WaitForChild("Veil", 20)
+		local ev = veil and veil:WaitForChild("updatewep", 20)
+		if not (ev and ev:IsA("RemoteEvent")) then return end
+		track(ev.OnClientEvent:Connect(function(...)
+			local char, state
+			for _, a in ipairs({ ... }) do
+				if typeof(a) == "Instance" then
+					if a:IsA("Player") then char = a.Character
+					elseif a:IsA("Model") then char = a end
+				elseif type(a) == "boolean" then
+					state = a
+				end
+			end
+			if state == nil then return end
+			if char then
+				wepState[char] = state
+			else
+				for _, pl in ipairs(Players:GetPlayers()) do
+					if pl ~= LP and pl.Character then wepState[pl.Character] = state end
+				end
+			end
+		end))
+	end)
+
+	local function holdingSpear(char)
+		local st = wepState[char]
+		if st ~= nil then return st end
+		for _, c in ipairs(char:GetChildren()) do
+			if c:IsA("Tool") and string.find(string.lower(c.Name), "spear", 1, true) then return true end
+		end
+		local sp = char:FindFirstChild("Spear", true)
+		if sp and sp:IsA("BasePart") and sp.Transparency >= 0.95 then return false end
+		return true
+	end
+
+	local function meleeAttacking(char)
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not animator then return false end
+		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if not ok or not tracks then return false end
+		for _, t in ipairs(tracks) do
+			local id = KINON_AnimationId(t)
+			if id ~= "" and not THROW_IDS[id] and KINON_ParryAnimationIds[id] then
+				local label = ""
+				pcall(function()
+					label = string.lower(tostring(t.Name or "") .. " " .. tostring(t.Animation and t.Animation.Name or ""))
+				end)
+				if not (label:find("spear", 1, true) or label:find("throw", 1, true) or label:find("charge", 1, true)) then
+					local playing = false
+					pcall(function() playing = t.IsPlaying end)
+					if playing then return true end
+				end
+			end
+		end
+		return false
+	end
+
 	local function groundPoint(pos, normal)
 		if normal.Y >= 0.6 then return pos, Vector3.yAxis end
 		local start = pos + normal * 0.4 + Vector3.new(0, 0.5, 0)
@@ -11154,6 +11302,11 @@ State.VeilLineObj = (function()
 	end
 
 	local function drawPath(e, origin, dir, speed)
+		local ignore = {}
+		for _, pl in ipairs(Players:GetPlayers()) do
+			if pl.Character then ignore[#ignore + 1] = pl.Character end
+		end
+		rayParams.FilterDescendantsInstances = ignore
 		local g = Vector3.new(0, -(tonumber(workspace.Gravity) or 196.2) * DROP, 0)
 		local v0 = dir * speed
 		local prev = origin
@@ -11167,15 +11320,19 @@ State.VeilLineObj = (function()
 				local hit = workspace:Raycast(prev, delta, rayParams)
 				if hit then nxt = hit.Position; hitPos, hitNormal = hit.Position, hit.Normal end
 				local seg = e.segs[i]
-				seg.CFrame = CFrame.lookAt(prev, nxt)
-				seg.Length = (nxt - prev).Magnitude
-				seg.Visible = true
+				local cam = workspace.CurrentCamera
+				local thick = cam and math.clamp(0.07 + (nxt - cam.CFrame.Position).Magnitude * 0.0012, 0.07, 0.3) or 0.12
+				seg.Size = Vector3.new(thick, thick, delta.Magnitude)
+				seg.CFrame = CFrame.lookAt((prev + nxt) / 2, nxt)
+				if cam and seg.Parent ~= cam then seg.Parent = cam end
 				used = i
 			end
 			prev = nxt
 			if hitPos then break end
 		end
-		for i = used + 1, MAX_STEPS do e.segs[i].Visible = false end
+		for i = used + 1, MAX_STEPS do
+			if e.segs[i].Parent then e.segs[i].Parent = nil end
+		end
 		if hitPos then
 			local gp, gn = groundPoint(hitPos, hitNormal)
 			if gp then
@@ -11218,25 +11375,19 @@ State.VeilLineObj = (function()
 				local hum = char and char:FindFirstChildOfClass("Humanoid")
 				if hrp and hum and hum.Health > 0 and (hrp.Position - camPos).Magnitude <= MAX_DIST and isVeil(plr, char) then
 					local e = pool[plr]
-					local pos = throwState(char)
-					if pos then
-						if not e then e = newEntry(); pool[plr] = e end
+					if not e then e = newEntry(); pool[plr] = e end
+					if meleeAttacking(char) then e.hideUntil = now + ATTACK_HIDE end
+					if (e.hideUntil or 0) > now or not holdingSpear(char) then
+						hideEntry(e)
+					else
 						local origin, dir = compute(char)
 						if origin then
-							local charge = math.clamp(pos / 1, 0.15, 1)
-							e.speed = BASE_SPEED * charge
-							e.origin, e.dir = origin, dir
-							e.until_ = now + LINGER
+							local pos = throwState(char)
+							local charge = pos and math.clamp(pos / 1, 0.15, 1) or 1
+							drawPath(e, origin, dir, BASE_SPEED * charge)
+						else
+							hideEntry(e)
 						end
-					end
-					if e and e.origin and (e.until_ or 0) > now then
-						if pos then
-							local origin, dir = compute(char)
-							if origin then e.origin, e.dir = origin, dir end
-						end
-						drawPath(e, e.origin, e.dir, e.speed or BASE_SPEED)
-					elseif e then
-						hideEntry(e)
 					end
 				else
 					local e = pool[plr]
@@ -11264,6 +11415,329 @@ State.VeilLineObj = (function()
 
 	return obj
 end)()
+
+State.KillerNotify = (function()
+	local CollectionService = game:GetService("CollectionService")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local K = { Enabled = false }
+
+	local MOVES = {
+		Slasher = { name = "Slasher", move1 = "134862031194933", move2 = "136973921948245", move1Name = "Lake of Mist", move2Name = "Pursuit" },
+		Stalker = { name = "Stalker", move1 = "85894094209457", move2 = "110045688062234", move1Name = "Hunt Mode", move2Name = "Evil Surge" },
+		Masked = { name = "Masked", move1 = "110441838520158", move2 = "95375588266919", move1Name = "Frenzy Sprint", move2Name = "Mask Swap" },
+		Killer = { name = "Nina", move1 = "108114231850675", move2 = "95375588266919", move1Name = "Shadow Step", move2Name = "Agony Lunge" },
+		Hidden = { name = "Hidden", move1 = "129570234771869", move2 = "130915693370693", move1Name = "Phantom Dash", move2Name = "Leap Vault" },
+		Abysswalker = { name = "Abysswalker", move1 = "86213737463907", move2 = "100395868673407", move1Name = "Abyssal Wave", move2Name = "Shadow Leap" },
+		Veil = { name = "Veil", move1 = "110881025348309", move2 = "95375588266919", move1Name = "Spear Throw", move2Name = "Spear Reload" },
+		Cure = { name = "The Cure", move1 = "119792658841268", move2 = "81019828986691", move1Name = "Elucidation", move2Name = "Gas Cloud" },
+		Butcher = { name = "Butcher", move1 = "121475438777829", move2 = "95375588266919", move1Name = "Chain Throw", move2Name = "Bear Trap" },
+	}
+	local THEME = {
+		Veil = Color3.fromRGB(0, 150, 255), Abysswalker = Color3.fromRGB(168, 85, 247), Butcher = Color3.fromRGB(239, 68, 68),
+		Cure = Color3.fromRGB(34, 197, 94), Masked = Color3.fromRGB(244, 63, 94), Slasher = Color3.fromRGB(249, 115, 22),
+		Stalker = Color3.fromRGB(148, 163, 184), Hidden = Color3.fromRGB(99, 102, 241), Killer = Color3.fromRGB(217, 119, 6),
+	}
+	local DEBOUNCE = 2.5
+
+	local H = { Gui = nil, Holder = nil, Active = nil, Type = nil, Moves = nil, Conns = {}, RemoteConns = {}, Last = {} }
+
+	local function clear(list)
+		for _, c in ipairs(list) do pcall(function() c:Disconnect() end) end
+		table.clear(list)
+	end
+
+	local function guiParent()
+		local ok, hui = pcall(function() return gethui and gethui() end)
+		if ok and typeof(hui) == "Instance" then return hui end
+		local core = game:GetService("CoreGui")
+		local okC = pcall(function()
+			local t = Instance.new("Folder")
+			t.Parent = core
+			t:Destroy()
+		end)
+		if okC then return core end
+		return LP:WaitForChild("PlayerGui")
+	end
+
+	local function ensureGui()
+		if H.Gui and H.Gui.Parent then return true end
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "KinonKillerNotify"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.DisplayOrder = 996
+		local holder = Instance.new("Frame")
+		holder.Name = "Holder"
+		holder.AnchorPoint = Vector2.new(0.5, 0)
+		holder.Position = UDim2.new(0.5, 0, 0.09, 0)
+		holder.Size = UDim2.fromOffset(300, 0)
+		holder.AutomaticSize = Enum.AutomaticSize.Y
+		holder.BackgroundTransparency = 1
+		holder.Parent = gui
+		local layout = Instance.new("UIListLayout")
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layout.Padding = UDim.new(0, 4)
+		layout.Parent = holder
+		local ok = pcall(function() gui.Parent = guiParent() end)
+		if not ok or not gui.Parent then
+			ok = pcall(function() gui.Parent = LP:WaitForChild("PlayerGui") end)
+		end
+		if not ok then return false end
+		H.Gui, H.Holder = gui, holder
+		return true
+	end
+
+	local order = 0
+	local function toast(text, iconId)
+		if not K.Enabled or not ensureGui() then return end
+		order = order + 1
+		local kids = {}
+		for _, c in ipairs(H.Holder:GetChildren()) do
+			if c:IsA("Frame") then kids[#kids + 1] = c end
+		end
+		table.sort(kids, function(x, y) return x.LayoutOrder < y.LayoutOrder end)
+		while #kids >= 3 do
+			pcall(function() kids[1]:Destroy() end)
+			table.remove(kids, 1)
+		end
+		local f = Instance.new("Frame")
+		f.LayoutOrder = order
+		f.Size = UDim2.fromOffset(0, 28)
+		f.AutomaticSize = Enum.AutomaticSize.X
+		f.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		f.BackgroundTransparency = 0.1
+		f.BorderSizePixel = 0
+		Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+		local st = Instance.new("UIStroke", f)
+		st.Color = Color3.fromRGB(255, 255, 255)
+		st.Thickness = 1
+		st.Transparency = 0.45
+		local lay = Instance.new("UIListLayout", f)
+		lay.FillDirection = Enum.FillDirection.Horizontal
+		lay.VerticalAlignment = Enum.VerticalAlignment.Center
+		lay.SortOrder = Enum.SortOrder.LayoutOrder
+		lay.Padding = UDim.new(0, 6)
+		local pad = Instance.new("UIPadding", f)
+		pad.PaddingLeft = UDim.new(0, 8)
+		pad.PaddingRight = UDim.new(0, 10)
+		local ic
+		if iconId then
+			ic = Instance.new("ImageLabel", f)
+			ic.LayoutOrder = 1
+			ic.Size = UDim2.fromOffset(16, 16)
+			ic.BackgroundTransparency = 1
+			ic.Image = "rbxassetid://" .. iconId
+			ic.ScaleType = Enum.ScaleType.Fit
+			Instance.new("UICorner", ic).CornerRadius = UDim.new(0, 4)
+		end
+		local lb = Instance.new("TextLabel", f)
+		lb.LayoutOrder = 2
+		lb.Size = UDim2.fromOffset(0, 28)
+		lb.AutomaticSize = Enum.AutomaticSize.X
+		lb.BackgroundTransparency = 1
+		lb.Text = text
+		lb.TextColor3 = Color3.fromRGB(255, 255, 255)
+		lb.Font = Enum.Font.GothamBold
+		lb.TextSize = 12
+		f.Parent = H.Holder
+		task.delay(2.4, function()
+			if not f.Parent then return end
+			local TS = game:GetService("TweenService")
+			pcall(function()
+				local info = TweenInfo.new(0.3)
+				TS:Create(f, info, { BackgroundTransparency = 1 }):Play()
+				TS:Create(st, info, { Transparency = 1 }):Play()
+				TS:Create(lb, info, { TextTransparency = 1 }):Play()
+				if ic then TS:Create(ic, info, { ImageTransparency = 1 }):Play() end
+			end)
+			task.wait(0.35)
+			pcall(function() f:Destroy() end)
+		end)
+	end
+
+	local function skillUsed(slot)
+		local m = H.Moves
+		if not m then return end
+		local now = os.clock()
+		if now - (H.Last[slot] or 0) < DEBOUNCE then return end
+		H.Last[slot] = now
+		toast(m.name .. " - " .. (slot == 1 and m.move1Name or m.move2Name), slot == 1 and m.move1 or m.move2)
+	end
+
+	local function isKillerChar(char)
+		if not char or not char:IsA("Model") or char == LP.Character then return false end
+		if not char:FindFirstChildOfClass("Humanoid") then return false end
+		local plr = Players:GetPlayerFromCharacter(char)
+		if plr == LP then return false end
+		if char:GetAttribute("Role") == "Killer" or char:GetAttribute("IsKiller") == true then return true end
+		if plr and plr.Team then
+			local t = string.lower(plr.Team.Name)
+			if t:find("killer", 1, true) or t:find("slasher", 1, true) then return true end
+		end
+		return false
+	end
+
+	local function findKiller()
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LP and plr.Character and isKillerChar(plr.Character)
+				and plr.Character:FindFirstChild("HumanoidRootPart") then return plr.Character end
+		end
+		for _, tag in ipairs(CollectionService:GetTagged("Killer")) do
+			local model = tag:IsA("Model") and tag or tag:FindFirstAncestorOfClass("Model")
+			if model and model ~= LP.Character and model:FindFirstChild("HumanoidRootPart") then return model end
+		end
+		local folder = workspace:FindFirstChild("Killers")
+		if folder then
+			for _, m in ipairs(folder:GetChildren()) do
+				if m:IsA("Model") and m ~= LP.Character and m:FindFirstChild("HumanoidRootPart") then return m end
+			end
+		end
+		return nil
+	end
+
+	local function resolveType(char)
+		local kName = char:GetAttribute("MorphedKiller") or char:GetAttribute("SelectedKiller")
+		local plr = Players:GetPlayerFromCharacter(char)
+		if not kName and plr then kName = plr:GetAttribute("SelectedKiller") or plr:GetAttribute("Killer") end
+		if not kName and MOVES[char.Name] then kName = char.Name end
+		if not kName then
+			for kn in pairs(MOVES) do
+				if string.find(string.lower(char.Name), string.lower(kn), 1, true) then kName = kn; break end
+			end
+		end
+		if kName and not MOVES[kName] then kName = nil end
+		return kName or "Veil"
+	end
+
+	local function bind(char)
+		if not char or char == H.Active then return end
+		H.Active = char
+		clear(H.Conns)
+		table.clear(H.Last)
+		local kType = resolveType(char)
+		H.Type = kType
+		local moves = MOVES[kType] or MOVES.Veil
+		H.Moves = moves
+		local plr = Players:GetPlayerFromCharacter(char)
+		local who = plr and (plr.DisplayName ~= "" and plr.DisplayName or plr.Name) or nil
+		toast("Killer: " .. moves.name .. (who and (" (" .. who .. ")") or ""))
+
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		local m1Id, m2Id = moves.move1, moves.move2
+		local function hookAnim(an)
+			table.insert(H.Conns, an.AnimationPlayed:Connect(function(trackObj)
+				local aId = (trackObj.Animation and trackObj.Animation.AnimationId) or ""
+				local tName = string.lower(trackObj.Name or "")
+				if aId:find(m1Id, 1, true) or tName:find("flask", 1, true) or tName:find("spear", 1, true)
+					or tName:find("chain", 1, true) or tName:find("wave", 1, true) or tName:find("mist", 1, true) then
+					skillUsed(1)
+				elseif aId:find(m2Id, 1, true) or tName:find("gas", 1, true) or tName:find("inject", 1, true)
+					or tName:find("trap", 1, true) or tName:find("leap", 1, true) or tName:find("frenzy", 1, true)
+					or tName:find("stalk", 1, true) or tName:find("reload", 1, true) or tName:find("pursuit", 1, true)
+					or tName:find("mask", 1, true) then
+					skillUsed(2)
+				end
+			end))
+		end
+		if animator then
+			hookAnim(animator)
+		else
+			table.insert(H.Conns, char.DescendantAdded:Connect(function(d)
+				if d:IsA("Animator") then hookAnim(d) end
+			end))
+		end
+
+		table.insert(H.Conns, char.AttributeChanged:Connect(function(attr)
+			local v = char:GetAttribute(attr)
+			if attr == "ChainMove1CD" then
+				if type(v) == "number" and v > 0 then skillUsed(1) end
+			elseif attr == "PlacingTrap" and v == true then
+				skillUsed(2)
+			end
+		end))
+
+		table.insert(H.Conns, workspace.ChildAdded:Connect(function(c)
+			local n = string.lower(c.Name)
+			if n:find("flask", 1, true) or n:find("spear", 1, true) or n:find("wave", 1, true) then skillUsed(1) end
+		end))
+	end
+
+	local function hookRemotes()
+		local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		if not Remotes then return end
+		local function attach(rem, handler)
+			if rem and rem:IsA("RemoteEvent") then table.insert(H.RemoteConns, rem.OnClientEvent:Connect(handler)) end
+		end
+		local killers = Remotes:FindFirstChild("Killers")
+		if not killers then return end
+		local cure = killers:FindFirstChild("Cure")
+		attach(cure and cure:FindFirstChild("VisualizeFlask"), function() skillUsed(1) end)
+		local veil = killers:FindFirstChild("Veil")
+		attach(veil and veil:FindFirstChild("SpearState"), function(state)
+			if state == "launch" or not state then skillUsed(1) end
+		end)
+		local b = killers:FindFirstChild("Butcher")
+		attach(b and b:FindFirstChild("ChainThrow"), function() skillUsed(1) end)
+		local a = killers:FindFirstChild("Abysswalker")
+		attach(a and a:FindFirstChild("visualize"), function() skillUsed(1) end)
+	end
+
+	local scanConn, acc = nil, 0
+	function K.SetEnabled(on)
+		K.Enabled = (on == true)
+		if scanConn then scanConn:Disconnect(); scanConn = nil end
+		clear(H.Conns)
+		clear(H.RemoteConns)
+		H.Active, H.Type, H.Moves = nil, nil, nil
+		if not K.Enabled or unloaded then
+			if H.Gui then pcall(function() H.Gui:Destroy() end) end
+			H.Gui, H.Holder = nil, nil
+			return
+		end
+		hookRemotes()
+		scanConn = RunService.Heartbeat:Connect(function(dt)
+			if unloaded or not K.Enabled then return end
+			acc = acc + dt
+			if acc < 0.5 then return end
+			acc = 0
+			if H.Active and not H.Active.Parent then
+				clear(H.Conns)
+				H.Active, H.Type, H.Moves = nil, nil, nil
+			end
+			local k = findKiller()
+			if H.Active and k and k ~= H.Active then
+				clear(H.Conns)
+				H.Active = nil
+			elseif H.Active and resolveType(H.Active) ~= H.Type then
+				clear(H.Conns)
+				k = H.Active
+				H.Active = nil
+			end
+			if not H.Active then
+				k = k or findKiller()
+				if k then
+					local okB, errB = pcall(bind, k)
+					if not okB then
+						H.Active = nil
+						warn("[KinonNotify] " .. tostring(errB))
+					end
+				end
+			end
+		end)
+	end
+
+	function K.Destroy()
+		K.SetEnabled(false)
+	end
+
+	return K
+end)()
+
+task.defer(function()
+	pcall(State.KillerNotify.SetEnabled, true)
+end)
 
 State.SpectatorCounter = (function()
 	local SC = { Enabled = false, Gui = nil, Label = nil }
@@ -11365,7 +11839,6 @@ State.SpectatorCounter = (function()
 	return SC
 end)()
 
--- ================== Killer Skill Cooldown (HUD) ==================
 do
 	local s = State.ESPPlayer
 	local esp = State.PlayerESPObj
@@ -12291,7 +12764,7 @@ do
 
 			local myRoot = myChar:FindFirstChild("HumanoidRootPart")
 			local killerRoot = killerChar and killerChar:FindFirstChild("HumanoidRootPart")
-			if myRoot and killerRoot and (myRoot.Position - killerRoot.Position).Magnitude <= math.clamp(tonumber(State.Utilities.AbyssDodgeRange) or 40, 10, 150) then
+			if myRoot and killerRoot and (myRoot.Position - killerRoot.Position).Magnitude <= math.clamp(tonumber(State.Utilities.AbyssDodgeRange) or 40, 10, 70) then
 				triggerCrouch()
 			end
 		end)
@@ -12664,8 +13137,8 @@ do
 	util(surv, "Always Fast Vault", "zap", "AlwaysFastVaultS")
 	util(surv, "Unlimited Vault", "infinity", "UnlimitedVaultS")
 	util(surv, "Auto Dodge Abyss", "shield", "AutoDodgeAbyssS")
-	addSlider(surv, "Abyss Dodge Range", "ruler", 10, 150,
-		function() return math.clamp(math.floor(tonumber(s.AbyssDodgeRange) or 40), 10, 150) end,
+	addSlider(surv, "Abyss Dodge Range", "ruler", 10, 70,
+		function() return math.clamp(math.floor(tonumber(s.AbyssDodgeRange) or 40), 10, 70) end,
 		function(v) s.AbyssDodgeRange = v end)
 	util(surv, "Vault & Slide Speed", "zap", "VaultSpeedS")
 	addSlider(surv, "Vault & Slide Speed Level", "gauge", 10, 20,
@@ -12724,6 +13197,10 @@ do
 	addCheckbox(card, "Predict Zig-Zag", "move",
 		function() return s.ZigZag end,
 		function(v) s.ZigZag = v end)
+	addDropdown(card, "Aim Target", "user", { "Head", "UpperTorso", "HumanoidRootPart" },
+		function(v) return v end,
+		function() return s.AimPart or "UpperTorso" end,
+		function(v) s.AimPart = v end)
 	addSlider(card, "Predict Lead %", "gauge", 50, 250,
 		function() return math.clamp(math.floor(tonumber(s.LeadScale) or 100), 50, 250) end,
 		function(v) s.LeadScale = v end)
@@ -14005,6 +14482,7 @@ local function unload()
 	pcall(function() State.SpectatorCounter.Stop() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.VeilLineObj:Destroy() end)
+	pcall(function() State.KillerNotify.Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
 	pcall(function()
