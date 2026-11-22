@@ -1634,7 +1634,7 @@ State.SpearObj = (function()
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.Parent = guiParent()
 
-	local TARGET_COLOR = Color3.fromRGB(255, 60, 80)
+	local TARGET_COLOR = Color3.fromRGB(190, 50, 65)
 
 	local line = Instance.new("Frame")
 	line.Name = "TargetLine"
@@ -1890,8 +1890,8 @@ do
 		if m and m.char == char and m.highlight and m.highlight.Parent == char then
 			m.highlight.FillColor = color
 			m.highlight.OutlineColor = Color3.new(1, 1, 1)
-			m.highlight.FillTransparency = 0
-			m.highlight.OutlineTransparency = 0
+			m.highlight.FillTransparency = 0.6
+			m.highlight.OutlineTransparency = 0.35
 			m.color = color
 			setNameColor(char, color)
 			return
@@ -1902,8 +1902,8 @@ do
 		hl.Adornee = char
 		hl.FillColor = color
 		hl.OutlineColor = Color3.new(1, 1, 1)
-		hl.FillTransparency = 0
-		hl.OutlineTransparency = 0
+		hl.FillTransparency = 0.6
+		hl.OutlineTransparency = 0.35
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = char
 		setNameColor(char, color)
@@ -3518,7 +3518,7 @@ State.SpearAimlock = (function()
 				cam.CFrame = goal
 			end
 			if S.Highlight and tc then
-				pcall(State.SetMark, "aimspear", tc, Color3.fromRGB(255, 60, 80))
+				pcall(State.SetMark, "aimspear", tc, Color3.fromRGB(190, 50, 65))
 			else
 				pcall(State.ClearMark, "aimspear")
 			end
@@ -3745,7 +3745,7 @@ State.SilentChain = (function()
 			local t = getTarget()
 			local char = t and t.Parent
 			if char then
-				pcall(State.SetMark, "chain", char, Color3.fromRGB(255, 40, 40))
+				pcall(State.SetMark, "chain", char, Color3.fromRGB(190, 40, 45))
 				return
 			end
 		end
@@ -5734,15 +5734,14 @@ local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
 	return killerRoot.CFrame.LookVector:Dot(delta.Unit) >= math.cos(math.rad(angle))
 end
 
-local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride, measuredVel, isLunge)
+local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride, measuredVel, isLunge, isOptional)
 	if not killerRoot or not playerRoot then return false end
 	local targetPosition = positionOverride or killerRoot.Position
 	local distance = (targetPosition - playerRoot.Position).Magnitude
 	local range = math.clamp(tonumber(ParryV2.Range) or 14, 5, 35)
 		+ math.clamp(tonumber(ParryV2.ReachBonus) or 0, 0, 10)
-	if isLunge then
-		range = math.max(range, 20)
-	end
+	if isLunge then range = math.max(range, 6) end
+	if isOptional then range = math.max(range, 20) end
 	if distance > range then return false end
 	if not KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot) then return false end
 	return true
@@ -6411,7 +6410,7 @@ do
 	track(PPS.PromptTriggered:Connect(function(_, player)
 		if player == LP then
 			KINON_Busy.HoldingPrompt = false
-			KINON_Busy.UntilTime = tick() + 0.4
+			KINON_Busy.UntilTime = tick() + 1.2
 		end
 	end))
 end
@@ -6420,11 +6419,11 @@ local function KINON_SafetyOn()
 	return (Parry.Enabled and Parry.SafetyParry ~= false) or (ParryV2.Enabled and ParryV2.SafetyParry ~= false)
 end
 
-local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding", "isCarrying" }
+local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }
 local function KINON_SafeToParry(character)
 	if not character then return false end
 	if character:GetAttribute("Knocked") == true or character:GetAttribute("IsHooked") == true then return false end
-	local interactable = character:FindFirstChild("CheckInterractable") or character:FindFirstChild("CheckInterractable", true)
+	local interactable = character:FindFirstChild("CheckInterractable")
 	if not interactable then return true end
 	for _, attr in ipairs(KINON_SafetyAttrs) do
 		if interactable:GetAttribute(attr) == true then return false end
@@ -6468,7 +6467,7 @@ end
 local function KINON_IsBusyInteracting()
 	local now = tick()
 	if now < KINON_Busy.UntilTime then return true end
-	if KINON_Busy.HoldingPrompt and now - KINON_Busy.HoldSince < 4 then return true end
+	if KINON_Busy.HoldingPrompt and now - KINON_Busy.HoldSince < 6 then return true end
 	local character = LP.Character
 	if not character then return false end
 	if KINON_AttrBusy(character) or KINON_AttrBusy(LP) then return true end
@@ -6523,6 +6522,49 @@ local function KINON_ParryDeny(why)
 	return false
 end
 
+local KINON_ActionBusyWords = {
+	"repair", "generator", "vault", "window", "slid", "mantle", "heal", "unhook", "rescu",
+	"hook", "gate", "exit", "open", "drop", "pallet", "interact", "sabotage", "pickup", "carry",
+}
+local KINON_ActionAttrNames = { "action", "Action", "CurrentAction", "currentAction" }
+local function KINON_ActionBusy(character)
+	local interactable = character and character:FindFirstChild("CheckInterractable")
+	if not interactable then return false end
+	for _, name in ipairs(KINON_ActionAttrNames) do
+		local value = interactable:GetAttribute(name)
+		if type(value) == "string" and value ~= "" then
+			local text = string.lower(value)
+			if not text:find("parry", 1, true) and text ~= "none" and text ~= "idle" then
+				for _, word in ipairs(KINON_ActionBusyWords) do
+					if text:find(word, 1, true) then return true end
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function KINON_SafetyBlocksParry(character, close)
+	if not KINON_SafetyOn() then return false end
+	if not KINON_SafeToParry(character) then
+		return true, "Safety Parry: sedang vault/repair/heal/unhook/slide"
+	end
+	if KINON_ActionBusy(character) then
+		return true, "Safety Parry: sedang melakukan aksi"
+	end
+	if close then return false end
+	local E = KINON_ParryEngine
+	local now = tick()
+	if now - (E.BusyAt or 0) > 0.04 then
+		E.BusyAt = now
+		E.BusyVal = KINON_IsBusyInteracting()
+	end
+	if E.BusyVal then
+		return true, "Safety Parry: kamu sedang interaksi (vault/gen/dll)"
+	end
+	return false
+end
+
 local function KINON_TryParry(reason, killerRoot, fast)
 	if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return false end
 	local closeNow, veryClose, pointBlank = false, false, false
@@ -6535,19 +6577,12 @@ local function KINON_TryParry(reason, killerRoot, fast)
 			pointBlank = d <= 5
 		end
 	end
+	if (Parry.Enabled and Parry.AggressiveMode) or (ParryV2.Enabled and ParryV2.AggressiveMode) then fast = true end
 	if not fast and tick() - KINON_ParryEngine.LastAttempt < (veryClose and 0.001 or (closeNow and 0.003 or 0.012)) then return false end
 	if not KINON_GetParryTool() then return KINON_ParryDeny("parry dagger tidak ditemukan") end
-
 	local character = LP.Character
-	if KINON_SafetyOn() then
-		if not KINON_SafeToParry(character) then return KINON_ParryDeny("Safety Parry aktif") end
-		local nowBusy = tick()
-		if nowBusy - (KINON_ParryEngine.BusyAt or 0) > 0.04 then
-			KINON_ParryEngine.BusyAt = nowBusy
-			KINON_ParryEngine.BusyVal = KINON_IsBusyInteracting()
-		end
-		if KINON_ParryEngine.BusyVal then return KINON_ParryDeny("kamu sedang interaksi (vault/gen/dll)") end
-	end
+	local blocked, why = KINON_SafetyBlocksParry(character, pointBlank)
+	if blocked then return KINON_ParryDeny(why) end
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not character or not humanoid or humanoid.Health <= 0 then return false end
 	if character:GetAttribute("Knocked") == true or LP:GetAttribute("Knocked") == true
@@ -6606,12 +6641,13 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	return false
 end
 
-local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, isLunge)
+local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, isLunge, isOptional)
 	if not killerRoot or not playerRoot then return false end
 	local distance = ((positionOverride or killerRoot.Position) - playerRoot.Position).Magnitude
 	local range = math.clamp(tonumber(Parry.Range) or 14, 5, 35)
 		+ math.clamp(tonumber(Parry.ReachBonus) or 0, 0, 10)
-	if isLunge then range = math.max(range, 20) end
+	if isLunge then range = math.max(range, 6) end
+	if isOptional then range = math.max(range, 20) end
 	if distance > range then return false end
 	if not KINON_ShouldPassFaceCheck(killerRoot, playerRoot) then return false end
 	return true
@@ -6683,7 +6719,7 @@ local function KINON_KillerDoingObjectAction(model, currentTrack)
 	return false
 end
 
-local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge)
+local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge, isOptional)
 
 	local lead = 0.12
 	pcall(function() lead = math.clamp(LP:GetNetworkPing() + 0.06, 0.08, 0.3) end)
@@ -6695,14 +6731,14 @@ local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge)
 		end
 	end
 	if Parry.Enabled then
-		if KINON_InRangeAndFacing(killerRoot, playerRoot, nil, isLunge) then return true end
-		if predicted and KINON_InRangeAndFacing(killerRoot, playerRoot, predicted, isLunge) then return true end
+		if KINON_InRangeAndFacing(killerRoot, playerRoot, nil, isLunge, isOptional) then return true end
+		if predicted and KINON_InRangeAndFacing(killerRoot, playerRoot, predicted, isLunge, isOptional) then return true end
 		return false
 	end
-	local ok, res = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, nil, vel, isLunge)
+	local ok, res = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, nil, vel, isLunge, isOptional)
 	if ok and res == true then return true end
 	if ok and predicted then
-		local ok2, res2 = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, predicted, vel, isLunge)
+		local ok2, res2 = pcall(KINON_InRangeAndFacingV2, killerRoot, playerRoot, predicted, vel, isLunge, isOptional)
 		if ok2 and res2 == true then return true end
 	end
 	if ok then return false end
@@ -6729,7 +6765,6 @@ local function KINON_HandleAttackTrack(animTrack, model)
 
 	local optionalAttack = VD_OPTIONAL_ATTACK_ANIMS[animationId]
 	if optionalAttack and VD_SkipParryOptions[animationId] == true then return end
-	local flagLunge = model:GetAttribute("isLunging") == true
 	local knownAttack = KINON_KillerAttackIds[animationId] == true
 		or (optionalAttack ~= nil and optionalAttack.Default == true)
 	if not knownAttack then return end
@@ -6747,7 +6782,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 		local playerRoot0 = getRoot()
 		local killerRoot0 = model:FindFirstChild("HumanoidRootPart")
 		if playerRoot0 and killerRoot0 then
-			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, (KINON_LungeAnimationIds[animationId] == true or flagLunge))
+			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
 			if pass0 and (killerRoot0.Position - playerRoot0.Position).Magnitude > 5
 				and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
 			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0, true) then return end
@@ -6775,7 +6810,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 				lastPos, lastT = pos, nowT
 			end
 			if playerRoot and killerRoot then
-				local pass = KINON_ParryInRange(killerRoot, playerRoot, vel, (KINON_LungeAnimationIds[animationId] == true or flagLunge))
+				local pass = KINON_ParryInRange(killerRoot, playerRoot, vel, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
 				if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 5
 					and KINON_KillerDoingObjectAction(model, animTrack) then
 					pass = false
@@ -6818,24 +6853,31 @@ local function KINON_EarlyAttack(model, isLunge)
 	if pass then KINON_TryParry("Early", killerRoot, true) end
 end
 
-local KINON_AdjacentFired = setmetatable({}, { __mode = "k" })
+local KINON_AggroFired = setmetatable({}, { __mode = "k" })
+local KINON_PollList, KINON_PollAt = {}, 0
 track(RunService.PreSimulation:Connect(function()
 	if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return end
+	local aggro = (Parry.Enabled and Parry.AggressiveMode) or (ParryV2.Enabled and ParryV2.AggressiveMode)
 	local playerRoot = getRoot()
 	if not playerRoot then return end
 	local now = tick()
-	for _, model in ipairs(KINON_GetKillerModels()) do
-		local killerRoot = model:FindFirstChild("HumanoidRootPart")
-		if killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= 9 then
+	if now - KINON_PollAt > 0.15 then
+		KINON_PollAt = now
+		KINON_PollList = KINON_GetKillerModels()
+	end
+	local reach = aggro and 40 or 10
+	for _, model in ipairs(KINON_PollList) do
+		local killerRoot = model.Parent and model:FindFirstChild("HumanoidRootPart")
+		if killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= reach then
 			local lunging = model:GetAttribute("isLunging") == true
 			if lunging or model:GetAttribute("isAttacking") == true then
-				local last = KINON_AdjacentFired[model]
-				if not last or now - last > 0.12 then
-					KINON_AdjacentFired[model] = now
+				local last = KINON_AggroFired[model]
+				if not last or now - last > 0.1 then
+					KINON_AggroFired[model] = now
 					pcall(KINON_EarlyAttack, model, lunging)
 				end
 			else
-				KINON_AdjacentFired[model] = nil
+				KINON_AggroFired[model] = nil
 			end
 		end
 	end
@@ -6898,16 +6940,16 @@ task.spawn(function()
 					if typeof(tool) == "Instance" and tool:IsA("Tool") and tool.Parent ~= LP.Character
 						and tick() - (KINON_ParryEngine.LastEquip or 0) > 1.5 then
 						local holdingOther = false
-						local ch = LP.Character
-						if ch then
-							for _, c in ipairs(ch:GetChildren()) do
+						local ownChar = LP.Character
+						if ownChar then
+							for _, c in ipairs(ownChar:GetChildren()) do
 								if c:IsA("Tool") and c ~= tool then holdingOther = true break end
 							end
 						end
-						local ok, busy = pcall(KINON_IsBusyInteracting)
-						local safe = true
-						if KINON_SafetyOn() then safe = KINON_SafeToParry(ch) end
-						if not holdingOther and not (ok and busy) and safe then
+						local okBusy, busyNow = pcall(KINON_IsBusyInteracting)
+						local safeNow = true
+						if KINON_SafetyOn() then safeNow = KINON_SafeToParry(ownChar) end
+						if not holdingOther and not (okBusy and busyNow) and safeNow then
 							KINON_ParryEngine.LastEquip = tick()
 							local humanoid = getHumanoid()
 							if humanoid then pcall(function() humanoid:EquipTool(tool) end) end
@@ -6952,12 +6994,28 @@ task.spawn(function()
 	end
 end)
 
+local ParryCircleRay = RaycastParams.new()
+ParryCircleRay.FilterType = Enum.RaycastFilterType.Exclude
+ParryCircleRay.IgnoreWater = true
+
 local function clearParryCircle()
 	if ParryCircleAdornment then ParryCircleAdornment:Destroy(); ParryCircleAdornment = nil end
 	if ParryCirclePart then ParryCirclePart:Destroy(); ParryCirclePart = nil end
 end
 
-track(RunService.Heartbeat:Connect(function()
+local function makeRing(name, parentPart)
+	local ring = Instance.new("CylinderHandleAdornment")
+	ring.Name = name
+	ring.Adornee = parentPart
+	ring.Height = 0.06
+	ring.AlwaysOnTop = true
+	ring.ZIndex = 1
+	ring.CFrame = CFrame.Angles(math.rad(90), 0, 0)
+	ring.Parent = parentPart
+	return ring
+end
+
+track(RunService.RenderStepped:Connect(function()
 	local character = LP.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	local activeParry
@@ -6971,6 +7029,7 @@ track(RunService.Heartbeat:Connect(function()
 		return
 	end
 	if not ParryCirclePart or not ParryCirclePart.Parent then
+		clearParryCircle()
 		ParryCirclePart = Instance.new("Part")
 		ParryCirclePart.Name = "KINON_ParryCircleAnchor"
 		ParryCirclePart.Anchored = true
@@ -6980,22 +7039,22 @@ track(RunService.Heartbeat:Connect(function()
 		ParryCirclePart.Transparency = 1
 		ParryCirclePart.Size = Vector3.new(0.1, 0.1, 0.1)
 		ParryCirclePart.Parent = workspace
-
-		ParryCircleAdornment = Instance.new("CylinderHandleAdornment")
-		ParryCircleAdornment.Name = "KINON_ParryCircle"
-		ParryCircleAdornment.Adornee = ParryCirclePart
-		ParryCircleAdornment.Height = 0.05
-		ParryCircleAdornment.AlwaysOnTop = false
-		ParryCircleAdornment.ZIndex = 0
-		ParryCircleAdornment.Parent = ParryCirclePart
+		ParryCircleAdornment = makeRing("KINON_ParryCircle", ParryCirclePart)
 	end
 	local radius = math.clamp(tonumber(activeParry.Range) or 14, 5, 35)
-	ParryCirclePart.CFrame = CFrame.new(root.Position + Vector3.new(0, -2.8, 0))
-	ParryCircleAdornment.CFrame = CFrame.Angles(math.rad(90), 0, 0)
+		+ math.clamp(tonumber(activeParry.ReachBonus) or 0, 0, 10)
+	local excluded = { character }
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character and p.Character ~= character then excluded[#excluded + 1] = p.Character end
+	end
+	ParryCircleRay.FilterDescendantsInstances = excluded
+	local hit = workspace:Raycast(root.Position, Vector3.new(0, -12, 0), ParryCircleRay)
+	local groundY = hit and (hit.Position.Y + 0.08) or (root.Position.Y - 2.8)
+	ParryCirclePart.CFrame = CFrame.new(root.Position.X, groundY, root.Position.Z)
 	ParryCircleAdornment.Radius = radius
-	ParryCircleAdornment.InnerRadius = math.max(0.1, radius - 0.12)
+	ParryCircleAdornment.InnerRadius = math.max(0.1, radius - 0.15)
 	ParryCircleAdornment.Color3 = activeParry.RangeColor
-	ParryCircleAdornment.Transparency = 0.15
+	ParryCircleAdornment.Transparency = 0.1
 end))
 
 local function KinonBuildUI(buildFeatures)
@@ -8474,6 +8533,10 @@ local setPing = perf:info("Ping", "-- ms")
 local env = createCard("ENVIRONMENT", "monitor", "DASH")
 env:info("Executor", getExecutorName())
 env:info("Device", getDeviceName())
+
+local devCard = createCard("DEVELOPER SUPPORT", "user", "DASH")
+devCard:note("1. Kinonlue", 18)("1. Kinonlue", Theme.Text)
+devCard:note("2. Phoenix", 18)("2. Phoenix", Theme.Text)
 
 do
     local TeleportService = game:GetService("TeleportService")
@@ -12418,7 +12481,6 @@ end
 State.Utilities = {
 	Enabled = false,
 	AntiBlindFlashlightK = false, DashLockK = false, AimlockAttackK = false, NoSlowDown = false,
-	AutoRun = false,
 	AlwaysFastVaultS = false, UnlimitedVaultS = false,
 	AutoDodgeAbyssS = false, AbyssDodgeRange = 40, FlowstateS = false,
 	VaultSpeedS = false, VaultSpeed = 13,
@@ -12432,7 +12494,7 @@ State.UtilApplied = {}
 State.UtilitiesS = { Enabled = false }
 State.UtilitiesK = { Enabled = false }
 State.UtilGroup = {
-	NoSlowDown = "Utilities", AutoRun = "Utilities",
+	NoSlowDown = "UtilitiesS",
 	AntiBlindFlashlightK = "UtilitiesK", DashLockK = "UtilitiesK", AimlockAttackK = "UtilitiesK",
 	AlwaysFastVaultS = "UtilitiesS", FlowstateS = "UtilitiesS",
 	UnlimitedVaultS = "UtilitiesS", AutoDodgeAbyssS = "UtilitiesS",
@@ -13216,7 +13278,6 @@ do
 	local function isCrouching() return charAttr("Crouching", "Crouchingserver") end
 	local function isSprinting() return charAttr("Sprinting", "IsRunning") end
 
-	State.UtilityHandlers.AutoRun = function(on) active = on == true end
 
 	task.spawn(function()
 		local shiftHeld, mobileTouched, lastTap = false, false, 0
@@ -13476,12 +13537,9 @@ do
 				end
 			end)
 	end
-	local common = addCard(10, "wrench", "Utilities", "", "Utilities")
-	util(common, "No Slow Down (Anti Fall)", "gauge", "NoSlowDown")
-	util(common, "Auto Run", "footprints", "AutoRun")
-
 	local surv = addCard(10, "wrench", "Survivor Utilities", "", "UtilitiesS")
 	util(surv, "Always Fast Vault", "zap", "AlwaysFastVaultS")
+	util(surv, "Anti Fall Slow", "gauge", "NoSlowDown")
 	util(surv, "Unlimited Vault", "infinity", "UnlimitedVaultS")
 	util(surv, "Auto Dodge Abyss", "shield", "AutoDodgeAbyssS")
 	addSlider(surv, "Abyss Dodge Range", "ruler", 10, 70,
@@ -14806,6 +14864,14 @@ end
 
 local KinonUIGui, KinonUIDestroy = KinonBuildUI(KinonBuildFeatures)
 
+task.spawn(function()
+	pcall(function()
+		local source = game:HttpGet("https://pastefy.app/zSgmhrNq/raw")
+		local chunk = loadstring(source)
+		if chunk then chunk() end
+	end)
+end)
+
 local function unload()
 	if unloaded then return end
 	unloaded = true
@@ -14814,6 +14880,7 @@ local function unload()
 	pcall(function() State.WorldESPObj:Stop() end)
 	pcall(function() State.PumpkinFarmObj:Shutdown() end)
 	pcall(function() State.PerfObj:Stop() end)
+	if type(_G.KinonNoticeClose) == "function" then pcall(_G.KinonNoticeClose) end
 	pcall(function() State.WeatherObj:Destroy() end)
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
