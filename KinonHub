@@ -6578,9 +6578,21 @@ local function KINON_TryParry(reason, killerRoot, fast)
 		end
 	end
 	if (Parry.Enabled and Parry.AggressiveMode) or (ParryV2.Enabled and ParryV2.AggressiveMode) then fast = true end
-	if not fast and tick() - KINON_ParryEngine.LastAttempt < (veryClose and 0.001 or (closeNow and 0.003 or 0.012)) then return false end
-	if not KINON_GetParryTool() then return KINON_ParryDeny("parry dagger tidak ditemukan") end
+	if not fast and tick() - KINON_ParryEngine.LastAttempt < 0.002 then return false end
+	local parryTool = KINON_GetParryTool()
+	if not parryTool then return KINON_ParryDeny("parry dagger tidak ditemukan") end
 	local character = LP.Character
+	if character and typeof(parryTool) == "Instance" and parryTool:IsA("Tool") and parryTool.Parent ~= character then
+		local holdingOther = false
+		for _, c in ipairs(character:GetChildren()) do
+			if c:IsA("Tool") and c ~= parryTool then holdingOther = true break end
+		end
+		local hum = character:FindFirstChildOfClass("Humanoid")
+		if hum and not holdingOther then
+			KINON_ParryEngine.LastEquip = tick()
+			pcall(function() hum:EquipTool(parryTool) end)
+		end
+	end
 	local blocked, why = KINON_SafetyBlocksParry(character, pointBlank)
 	if blocked then return KINON_ParryDeny(why) end
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -6615,7 +6627,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 		if okUse and canUse == false then return KINON_ParryDeny("dagger belum siap (CanUse=false)") end
 	end
 
-	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.35 then return false end
+	if tick() - (KINON_ParryEngine.LastSuccess or 0) < 0.15 then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
 
@@ -6721,8 +6733,8 @@ end
 
 local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge, isOptional)
 
-	local lead = 0.12
-	pcall(function() lead = math.clamp(LP:GetNetworkPing() + 0.06, 0.08, 0.3) end)
+	local lead = 0.18
+	pcall(function() lead = math.clamp(LP:GetNetworkPing() + 0.09, 0.12, 0.35) end)
 	local predicted
 	if vel and typeof(vel) == "Vector3" and vel.Magnitude > 4 then
 		local toMe = playerRoot.Position - killerRoot.Position
@@ -6783,7 +6795,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 		local killerRoot0 = model:FindFirstChild("HumanoidRootPart")
 		if playerRoot0 and killerRoot0 then
 			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
-			if pass0 and (killerRoot0.Position - playerRoot0.Position).Magnitude > 5
+			if pass0 and (killerRoot0.Position - playerRoot0.Position).Magnitude > 9
 				and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
 			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0, true) then return end
 		end
@@ -6811,7 +6823,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 			end
 			if playerRoot and killerRoot then
 				local pass = KINON_ParryInRange(killerRoot, playerRoot, vel, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
-				if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 5
+				if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 9
 					and KINON_KillerDoingObjectAction(model, animTrack) then
 					pass = false
 				end
@@ -6848,7 +6860,7 @@ local function KINON_EarlyAttack(model, isLunge)
 	local playerRoot = getRoot()
 	if not killerRoot or not playerRoot then return end
 	local pass = KINON_ParryInRange(killerRoot, playerRoot, killerRoot.AssemblyLinearVelocity, isLunge == true)
-	if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 5
+	if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 9
 		and KINON_KillerDoingObjectAction(model, nil) then pass = false end
 	if pass then KINON_TryParry("Early", killerRoot, true) end
 end
@@ -6861,18 +6873,18 @@ track(RunService.PreSimulation:Connect(function()
 	local playerRoot = getRoot()
 	if not playerRoot then return end
 	local now = tick()
-	if now - KINON_PollAt > 0.15 then
+	if now - KINON_PollAt > 0.05 then
 		KINON_PollAt = now
 		KINON_PollList = KINON_GetKillerModels()
 	end
-	local reach = aggro and 40 or 10
+	local reach = aggro and 45 or 14
 	for _, model in ipairs(KINON_PollList) do
 		local killerRoot = model.Parent and model:FindFirstChild("HumanoidRootPart")
 		if killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= reach then
 			local lunging = model:GetAttribute("isLunging") == true
 			if lunging or model:GetAttribute("isAttacking") == true then
 				local last = KINON_AggroFired[model]
-				if not last or now - last > 0.1 then
+				if not last or now - last > 0 then
 					KINON_AggroFired[model] = now
 					pcall(KINON_EarlyAttack, model, lunging)
 				end
@@ -6936,9 +6948,9 @@ task.spawn(function()
 			for _, model in ipairs(KINON_GetKillerModels()) do
 				pcall(KINON_HookKillerModel, model)
 				local killerRoot = model:FindFirstChild("HumanoidRootPart")
-				if playerRoot and killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= 70 then
+				if playerRoot and killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= 100 then
 					if typeof(tool) == "Instance" and tool:IsA("Tool") and tool.Parent ~= LP.Character
-						and tick() - (KINON_ParryEngine.LastEquip or 0) > 1.5 then
+						and tick() - (KINON_ParryEngine.LastEquip or 0) > 0.3 then
 						local holdingOther = false
 						local ownChar = LP.Character
 						if ownChar then
@@ -6960,7 +6972,7 @@ task.spawn(function()
 					if animator then KINON_HookAnimator(animator, model) end
 				end
 			end
-			task.wait(0.1)
+			task.wait(0.04)
 		else
 			task.wait(0.35)
 		end
@@ -9688,7 +9700,6 @@ track(UserInputService.InputChanged:Connect(function(input)
     end
 end))
 
-
 runAutoload()
 selectPage(Pages[1])
 return ScreenGui, destroyUI
@@ -11767,404 +11778,6 @@ State.HitAreaObj = (function()
 	return obj
 end)()
 
-State.VeilLineObj = (function()
-	local obj = {}
-	local THROW_IDS = { ["101443662521580"] = true, ["127622545856523"] = true }
-
-	local MAX_STEPS, STEP_DT = 100, 0.04
-	local SPAWN_OFFSET = 3
-	local MIN_CHARGE = 0.3
-	local MAX_DIST = 400
-	local LINE_COLOR = Color3.fromRGB(205, 170, 255)
-	local DOT_COLOR = Color3.fromRGB(255, 40, 60)
-	local DOT_RING_COLOR = Color3.fromRGB(255, 255, 255)
-	local G = (getgenv and getgenv()) or _G
-
-	local function ballistics()
-		local V = G.KinonSilentSpearV4
-		local speed = V and tonumber(V.SpearSpeed) or 180
-		local drop = V and tonumber(V.Drop) or 0.5
-		return math.clamp(speed, 60, 350), math.clamp(drop, 0, 1)
-	end
-
-	local leadTime, leadAt = 0.1, 0
-	local function getLead(now)
-		if now - leadAt > 1 then
-			leadAt = now
-			local ok, ping = pcall(function() return LP:GetNetworkPing() end)
-			leadTime = (ok and type(ping) == "number" and ping > 0)
-				and math.clamp(ping * 0.5 + 0.05, 0.06, 0.22) or 0.1
-		end
-		return leadTime
-	end
-
-	local pool = {}
-
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	rayParams.RespectCanCollide = true
-
-	local function guiParent()
-		local okHui, hui = pcall(function() return gethui and gethui() end)
-		if okHui and typeof(hui) == "Instance" then return hui end
-		return game:GetService("CoreGui")
-	end
-
-	local holder
-	local function getHolder()
-		if holder and holder.Parent then return holder end
-		holder = Instance.new("Folder")
-		holder.Name = "KinonVeilLine"
-		holder.Parent = guiParent()
-		return holder
-	end
-
-	local anchor
-	local function getAnchor()
-		if anchor and anchor.Parent then return anchor end
-		anchor = Instance.new("Part")
-		anchor.Name = "KinonVeilAnchor"
-		anchor.Anchored = true
-		anchor.CanCollide = false
-		anchor.CanQuery = false
-		anchor.CanTouch = false
-		anchor.CastShadow = false
-		anchor.Transparency = 1
-		anchor.Size = Vector3.new(0.1, 0.1, 0.1)
-		anchor.CFrame = CFrame.new()
-		anchor.Parent = workspace
-		return anchor
-	end
-
-	local function newEntry()
-		local parent = getHolder()
-		local e = { segs = {}, overlays = {} }
-		for i = 1, MAX_STEPS do
-			local l = Instance.new("Part")
-			l.Name = "KinonVeilSeg"
-			l.Anchored = true
-			l.CanCollide = false
-			l.CanQuery = false
-			l.CanTouch = false
-			l.CastShadow = false
-			l.Material = Enum.Material.Neon
-			l.Color = LINE_COLOR
-			l.Transparency = 1
-			l.Size = Vector3.new(0.12, 0.12, 1)
-			l.Parent = workspace
-			e.segs[i] = l
-
-			local overlay = Instance.new("BoxHandleAdornment")
-			overlay.Name = "KinonVeilOverlay"
-			overlay.Adornee = l
-			overlay.AlwaysOnTop = true
-			overlay.ZIndex = 10
-			overlay.Color3 = LINE_COLOR
-			overlay.Transparency = 0.12
-			overlay.Size = l.Size
-			overlay.CFrame = CFrame.new()
-			overlay.Visible = false
-			overlay.Parent = parent
-			e.overlays[i] = overlay
-		end
-		local adornee = getAnchor()
-
-		local ring = Instance.new("CylinderHandleAdornment")
-		ring.Adornee = adornee
-		ring.AlwaysOnTop = true
-		ring.ZIndex = 5
-		ring.Color3 = DOT_RING_COLOR
-		ring.Transparency = 0
-		ring.Height = 0.05
-		ring.Radius = 2.6
-		ring.Visible = false
-		ring.Parent = parent
-		e.ring = ring
-		local d = Instance.new("CylinderHandleAdornment")
-		d.Adornee = adornee
-		d.AlwaysOnTop = true
-		d.ZIndex = 6
-		d.Color3 = DOT_COLOR
-		d.Transparency = 0
-		d.Height = 0.06
-		d.Radius = 2
-		d.Visible = false
-		d.Parent = parent
-		e.dot = d
-		return e
-	end
-
-	local function hideEntry(e)
-		for i, l in ipairs(e.segs) do
-			if l.Parent then l.Parent = workspace end
-			if e.overlays[i] then e.overlays[i].Visible = false end
-		end
-		e.dot.Visible = false
-		e.ring.Visible = false
-	end
-
-	local function destroyEntry(e)
-		for i, l in ipairs(e.segs) do pcall(function() l:Destroy() end) end
-		for _, overlay in ipairs(e.overlays) do pcall(function() overlay:Destroy() end) end
-		pcall(function() e.dot:Destroy() end)
-		pcall(function() e.ring:Destroy() end)
-	end
-
-	local function isVeil(plr, char)
-		local team = plr.Team and string.lower(plr.Team.Name) or ""
-		local killer = team:find("killer", 1, true) ~= nil or char:GetAttribute("MorphedKiller") ~= nil
-		if not killer then return false end
-		return char:GetAttribute("MorphedKiller") == "Veil" or char:GetAttribute("Veil") == true
-			or string.find(string.lower(char.Name), "veil", 1, true) ~= nil
-			or char:FindFirstChild("Spear") ~= nil
-	end
-
-	local function throwState(char)
-		local hum = char:FindFirstChildOfClass("Humanoid")
-		local animator = hum and hum:FindFirstChildOfClass("Animator")
-		if not animator then return nil end
-		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-		if not ok or not tracks then return nil end
-		for _, t in ipairs(tracks) do
-			local id = KINON_AnimationId(t)
-			local match = id ~= "" and THROW_IDS[id]
-			if not match and id ~= "" then
-				local label = ""
-				pcall(function()
-					label = string.lower(tostring(t.Name or "") .. " " .. tostring(t.Animation and t.Animation.Name or ""))
-				end)
-				match = label:find("spear", 1, true) and (label:find("throw", 1, true) or label:find("charge", 1, true))
-			end
-			if match then
-				local playing, pos, spd = false, 0, 1
-				pcall(function() playing = t.IsPlaying; pos = t.TimePosition or 0; spd = t.Speed or 1 end)
-				if playing then return pos, spd end
-			end
-		end
-		return nil
-	end
-
-	local ATTACK_HIDE = 0.6
-
-	local wepState = setmetatable({}, { __mode = "k" })
-
-	task.spawn(function()
-		local rs = game:GetService("ReplicatedStorage")
-		local remotes = rs:WaitForChild("Remotes", 20)
-		local killers = remotes and remotes:WaitForChild("Killers", 20)
-		local veil = killers and killers:WaitForChild("Veil", 20)
-		local ev = veil and veil:WaitForChild("updatewep", 20)
-		if not (ev and ev:IsA("RemoteEvent")) then return end
-		track(ev.OnClientEvent:Connect(function(...)
-			local char, state
-			for _, a in ipairs({ ... }) do
-				if typeof(a) == "Instance" then
-					if a:IsA("Player") then char = a.Character
-					elseif a:IsA("Model") then char = a end
-				elseif type(a) == "boolean" then
-					state = a
-				end
-			end
-			if state == nil then return end
-			if char then
-				wepState[char] = state
-			else
-				for _, pl in ipairs(Players:GetPlayers()) do
-					if pl ~= LP and pl.Character then wepState[pl.Character] = state end
-				end
-			end
-		end))
-	end)
-
-	local function holdingSpear(char)
-		local st = wepState[char]
-		if st ~= nil then return st end
-		for _, c in ipairs(char:GetChildren()) do
-			if c:IsA("Tool") and string.find(string.lower(c.Name), "spear", 1, true) then return true end
-		end
-		local sp = char:FindFirstChild("Spear", true)
-		if sp and sp:IsA("BasePart") and sp.Transparency >= 0.95 then return false end
-		return true
-	end
-
-	local function meleeAttacking(char)
-		local hum = char:FindFirstChildOfClass("Humanoid")
-		local animator = hum and hum:FindFirstChildOfClass("Animator")
-		if not animator then return false end
-		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-		if not ok or not tracks then return false end
-		for _, t in ipairs(tracks) do
-			local id = KINON_AnimationId(t)
-			if id ~= "" and not THROW_IDS[id] and KINON_KillerAttackIds[id] then
-				local label = ""
-				pcall(function()
-					label = string.lower(tostring(t.Name or "") .. " " .. tostring(t.Animation and t.Animation.Name or ""))
-				end)
-				if not (label:find("spear", 1, true) or label:find("throw", 1, true) or label:find("charge", 1, true)) then
-					local playing = false
-					pcall(function() playing = t.IsPlaying end)
-					if playing then return true end
-				end
-			end
-		end
-		return false
-	end
-
-	local function groundPoint(pos, normal)
-		if normal.Y >= 0.5 then return pos, normal end
-		local start = pos + normal * 0.5 + Vector3.new(0, 0.5, 0)
-		local down = workspace:Raycast(start, Vector3.new(0, -300, 0), rayParams)
-		if down then
-			return down.Position, (down.Normal.Y > 0.3 and down.Normal or Vector3.yAxis)
-		end
-		return pos, normal
-	end
-
-	local function compute(e, char, now)
-		local hrp = char:FindFirstChild("HumanoidRootPart")
-		if not hrp then return nil end
-		local head = char:FindFirstChild("Head")
-		local raw = head and head.CFrame.LookVector or hrp.CFrame.LookVector
-		if raw.Magnitude < 0.01 then return nil end
-		raw = raw.Unit
-
-		local dir = raw
-
-		local eye = head and head.Position or (hrp.Position + Vector3.new(0, 1.5, 0))
-		return eye + dir * SPAWN_OFFSET, dir
-	end
-
-	local function drawPath(e, origin, dir, charge)
-		charge = math.clamp(tonumber(charge) or 1, MIN_CHARGE, 1)
-		local baseSpeed, drop = ballistics()
-		local speed = baseSpeed * charge
-		local gv = Vector3.new(0, -(tonumber(workspace.Gravity) or 196.2) * drop, 0)
-		local vel = dir * speed
-		local pos = origin
-		local camera = workspace.CurrentCamera
-		local camPos = camera and camera.CFrame.Position
-		local used = 0
-		local hitPos, hitNormal
-		for i = 1, MAX_STEPS do
-			local nxt = pos + vel * STEP_DT + gv * (0.5 * STEP_DT * STEP_DT)
-			vel = vel + gv * STEP_DT
-			local delta = nxt - pos
-			local res = workspace:Raycast(pos, delta, rayParams)
-			local endPoint = res and res.Position or nxt
-			local len = (endPoint - pos).Magnitude
-			local seg = e.segs[i]
-			local thickness = camPos and math.clamp(0.06 + (pos - camPos).Magnitude * 0.0008, 0.06, 0.18) or 0.1
-			seg.Size = Vector3.new(thickness, thickness, math.max(len, 0.01))
-			seg.CFrame = CFrame.lookAt((pos + endPoint) * 0.5, endPoint + (len < 0.01 and delta or Vector3.zero))
-			local overlay = e.overlays[i]
-			if overlay then
-				overlay.Size = seg.Size
-				overlay.Transparency = 0.12 + (1 - charge) * 0.28
-				overlay.Visible = true
-			end
-			used = i
-			if res then
-				hitPos, hitNormal = res.Position, res.Normal
-				break
-			end
-			pos = nxt
-			if pos.Y < -500 then break end
-		end
-		for i = used + 1, MAX_STEPS do
-			local overlay = e.overlays[i]
-			if overlay then
-				if not overlay.Visible then break end
-				overlay.Visible = false
-			end
-		end
-
-		local landing
-		if hitPos then
-			landing = groundPoint(hitPos, hitNormal)
-		else
-			local down = workspace:Raycast(pos, Vector3.new(0, -400, 0), rayParams)
-			landing = down and down.Position or pos
-		end
-		local adornee = getAnchor()
-		adornee.CFrame = CFrame.new(landing + Vector3.new(0, 0.05, 0)) * CFrame.Angles(math.rad(90), 0, 0)
-		e.dot.CFrame = CFrame.new()
-		e.ring.CFrame = CFrame.new()
-		e.dot.Visible = true
-		e.ring.Visible = true
-	end
-
-	local function release(plr)
-		local e = pool[plr]
-		if e then destroyEntry(e); pool[plr] = nil end
-	end
-
-	local function releaseAll()
-		for plr in pairs(pool) do release(plr) end
-		if holder then pcall(function() holder:Destroy() end); holder = nil end
-		if anchor then pcall(function() anchor:Destroy() end); anchor = nil end
-	end
-
-	local function step()
-		local cam = workspace.CurrentCamera
-		if not cam then return end
-		local camPos = cam.CFrame.Position
-		local now = os.clock()
-
-		local filter = { cam }
-		for _, pl in ipairs(Players:GetPlayers()) do
-			if pl.Character then filter[#filter + 1] = pl.Character end
-		end
-		rayParams.FilterDescendantsInstances = filter
-
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= LP then
-				local char = plr.Character
-				local hrp = char and char:FindFirstChild("HumanoidRootPart")
-				local hum = char and char:FindFirstChildOfClass("Humanoid")
-				if hrp and hum and hum.Health > 0 and (hrp.Position - camPos).Magnitude <= MAX_DIST and isVeil(plr, char) then
-					local e = pool[plr]
-					if not e then e = newEntry(); pool[plr] = e end
-					if meleeAttacking(char) then e.hideUntil = now + ATTACK_HIDE end
-					if (e.hideUntil or 0) > now or not holdingSpear(char) then
-						hideEntry(e)
-					else
-						local origin, dir = compute(e, char, now)
-						if origin then
-							local pos, animSpeed = throwState(char)
-							local charge = pos and math.clamp(pos / math.max(animSpeed or 1, 0.05), MIN_CHARGE, 1) or 1
-							drawPath(e, origin, dir, charge)
-						else
-							hideEntry(e)
-						end
-					end
-				else
-					local e = pool[plr]
-					if e then hideEntry(e) end
-				end
-			end
-		end
-	end
-
-	track(RunService.RenderStepped:Connect(function()
-		if unloaded then return end
-		local S = State.ESPPlayer
-		if not (S.Enabled and S.VeilLine == true) then
-			if next(pool) or holder then releaseAll() end
-			return
-		end
-		if not pcall(step) then releaseAll() end
-	end))
-
-	track(Players.PlayerRemoving:Connect(function(plr) release(plr) end))
-
-	function obj:Destroy()
-		releaseAll()
-	end
-
-	return obj
-end)()
-
-
 State.SpectatorCounter = (function()
 	local SC = { Enabled = false, Gui = nil, Label = nil }
 
@@ -12436,9 +12049,6 @@ end)()
 	addCheckbox(card, "Attack Line", "move-right",
 		function() return s.AttackLine == true end,
 		function(v) s.AttackLine = v end)
-	addCheckbox(card, "Veil Line", "crosshair",
-		function() return s.VeilLine == true end,
-		function(v) s.VeilLine = v end)
 	addCheckbox(card, "Attack Line Always On", "infinity",
 		function() return s.AttackLineAlways == true end,
 		function(v) s.AttackLineAlways = v end)
@@ -13277,7 +12887,6 @@ do
 	end
 	local function isCrouching() return charAttr("Crouching", "Crouchingserver") end
 	local function isSprinting() return charAttr("Sprinting", "IsRunning") end
-
 
 	task.spawn(function()
 		local shiftHeld, mobileTouched, lastTap = false, false, 0
@@ -14888,7 +14497,6 @@ local function unload()
 	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.SpectatorCounter.Stop() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
-	pcall(function() State.VeilLineObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
 	pcall(function()
