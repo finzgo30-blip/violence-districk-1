@@ -30,7 +30,7 @@ local Parry = {
 	Enabled = false,
 	Range = 14,
 	ReachBonus = 2,
-	FaceSensitivity = 10,
+	FaceSensitivity = 6,
 	AggressiveMode = true,
 	SafetyParry = true,
 	Distance = 15,
@@ -43,7 +43,7 @@ local ParryV2 = {
 	Enabled = false,
 	Range = 14,
 	ReachBonus = 2,
-	FaceSensitivity = 10,
+	FaceSensitivity = 6,
 	AggressiveMode = true,
 	SafetyParry = true,
 	CircleVisible = false,
@@ -5715,10 +5715,14 @@ local function KINON_ShouldPassFaceCheck(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local delta = playerRoot.Position - killerRoot.Position
-	if delta.Magnitude <= 6 then return true end
-	local angle = 15 + math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10 * 75
-	return killerRoot.CFrame.LookVector:Dot(delta.Unit) >= math.cos(math.rad(angle))
+	local sens = math.clamp(tonumber(Parry.FaceSensitivity) or 6, 0, 10) / 10
+	if sens <= 0 then return true end
+	local toMe = Vector3.new(playerRoot.Position.X - killerRoot.Position.X, 0, playerRoot.Position.Z - killerRoot.Position.Z)
+	if toMe.Magnitude < 3 then return true end
+	local look = killerRoot.CFrame.LookVector
+	look = Vector3.new(look.X, 0, look.Z)
+	if look.Magnitude < 0.05 then return true end
+	return look.Unit:Dot(toMe.Unit) >= math.clamp(-1 + (2 * sens), -1, 1)
 end
 
 local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
@@ -5728,10 +5732,14 @@ local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local delta = playerRoot.Position - killerRoot.Position
-	if delta.Magnitude <= 6 then return true end
-	local angle = 15 + math.clamp(tonumber(ParryV2.FaceSensitivity) or 10, 0, 10) / 10 * 75
-	return killerRoot.CFrame.LookVector:Dot(delta.Unit) >= math.cos(math.rad(angle))
+	local sens = math.clamp(tonumber(ParryV2.FaceSensitivity) or 6, 0, 10) / 10
+	if sens <= 0 then return true end
+	local toMe = Vector3.new(playerRoot.Position.X - killerRoot.Position.X, 0, playerRoot.Position.Z - killerRoot.Position.Z)
+	if toMe.Magnitude < 3 then return true end
+	local look = killerRoot.CFrame.LookVector
+	look = Vector3.new(look.X, 0, look.Z)
+	if look.Magnitude < 0.05 then return true end
+	return look.Unit:Dot(toMe.Unit) >= math.clamp(-1 + (2 * sens), -1, 1)
 end
 
 local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride, measuredVel, isLunge, isOptional)
@@ -5740,7 +5748,6 @@ local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride
 	local distance = (targetPosition - playerRoot.Position).Magnitude
 	local range = math.clamp(tonumber(ParryV2.Range) or 14, 5, 35)
 		+ math.clamp(tonumber(ParryV2.ReachBonus) or 0, 0, 10)
-	if isLunge then range = math.max(range, 6) end
 	if isOptional then range = math.max(range, 20) end
 	if distance > range then return false end
 	if not KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot) then return false end
@@ -6162,6 +6169,7 @@ local VD_NO_PARRY_ANIMS = {
 	["76744850905644"]  = "Myers Grab",
 	["71001061734896"]  = "Take Out Spear",
 	["129669521834246"] = "Put Away Spear",
+	["125224839697689"] = "Jason No Parry",
 }
 
 local VD_OPTIONAL_ATTACK_ANIMS = {
@@ -6220,7 +6228,7 @@ local function KINON_IsKillerModel(model)
 	return false
 end
 
-local function KINON_GetKillerModels()
+local function KINON_ScanKillerModels()
 	local result, seen = {}, {}
 	local function add(model)
 		if model and not seen[model] and KINON_IsKillerModel(model) then
@@ -6241,6 +6249,21 @@ local function KINON_GetKillerModels()
 		if obj:IsA("Model") then add(obj) end
 	end
 	return result
+end
+
+local KINON_KillerCache, KINON_KillerCacheAt = nil, 0
+local function KINON_GetKillerModels()
+	local now = tick()
+	if KINON_KillerCache and now - KINON_KillerCacheAt < 0.2 then
+		local alive = {}
+		for _, m in ipairs(KINON_KillerCache) do
+			if m.Parent then alive[#alive + 1] = m end
+		end
+		return alive
+	end
+	KINON_KillerCache = KINON_ScanKillerModels()
+	KINON_KillerCacheAt = now
+	return KINON_KillerCache
 end
 
 local function KINON_GetParryTool()
@@ -6395,22 +6418,44 @@ local function KINON_TryFallbackParry()
 	return fired
 end
 
-local KINON_Busy = { HoldingPrompt = false, HoldSince = 0, UntilTime = 0 }
+local KINON_Busy = { HoldingPrompt = false, HoldSince = 0, UntilTime = 0, VaultUntil = 0 }
 do
 	local PPS = game:GetService("ProximityPromptService")
-	track(PPS.PromptButtonHoldBegan:Connect(function(_, player)
-		if player == LP then KINON_Busy.HoldingPrompt = true; KINON_Busy.HoldSince = tick() end
+	local function isVaultPrompt(prompt)
+		local text = ""
+		pcall(function()
+			text = string.lower(tostring(prompt.Name) .. " " .. tostring(prompt.ActionText) .. " " .. tostring(prompt.ObjectText))
+			local p = prompt.Parent
+			for _ = 1, 3 do
+				if not p then break end
+				text = text .. " " .. string.lower(tostring(p.Name))
+				p = p.Parent
+			end
+		end)
+		for _, w in ipairs({ "vault", "window", "slide", "mantle", "jump" }) do
+			if text:find(w, 1, true) then return true end
+		end
+		return false
+	end
+	track(PPS.PromptButtonHoldBegan:Connect(function(prompt, player)
+		if player == LP then
+			KINON_Busy.HoldingPrompt = true
+			KINON_Busy.HoldSince = tick()
+			if isVaultPrompt(prompt) then KINON_Busy.VaultUntil = tick() + 1.2 end
+		end
 	end))
-	track(PPS.PromptButtonHoldEnded:Connect(function(_, player)
+	track(PPS.PromptButtonHoldEnded:Connect(function(prompt, player)
 		if player == LP then
 			KINON_Busy.HoldingPrompt = false
 			KINON_Busy.UntilTime = math.max(KINON_Busy.UntilTime, tick() + 0.35)
+			if isVaultPrompt(prompt) then KINON_Busy.VaultUntil = math.max(KINON_Busy.VaultUntil, tick() + 0.9) end
 		end
 	end))
-	track(PPS.PromptTriggered:Connect(function(_, player)
+	track(PPS.PromptTriggered:Connect(function(prompt, player)
 		if player == LP then
 			KINON_Busy.HoldingPrompt = false
 			KINON_Busy.UntilTime = tick() + 1.2
+			if isVaultPrompt(prompt) then KINON_Busy.VaultUntil = tick() + 1.2 end
 		end
 	end))
 end
@@ -6544,6 +6589,60 @@ local function KINON_ActionBusy(character)
 	return false
 end
 
+local KINON_VaultWords = { "vault", "slid", "mantle", "window" }
+local KINON_VaultCache = { at = 0, val = false }
+local KINON_VaultBusyRaw
+local function KINON_VaultBusy(character)
+	if tick() < KINON_Busy.VaultUntil then return true end
+	local now = tick()
+	if now - KINON_VaultCache.at < 0.03 then return KINON_VaultCache.val end
+	KINON_VaultCache.val = KINON_VaultBusyRaw(character)
+	KINON_VaultCache.at = now
+	return KINON_VaultCache.val
+end
+
+KINON_VaultBusyRaw = function(character)
+	if not character then return false end
+	local function attrsVault(inst)
+		if not inst then return false end
+		local ok, attrs = pcall(function() return inst:GetAttributes() end)
+		if not ok or type(attrs) ~= "table" then return false end
+		for name, value in pairs(attrs) do
+			if value == true then
+				local n = string.lower(tostring(name))
+				if KINON_IsActionFlagName(n) then
+					for _, w in ipairs(KINON_VaultWords) do
+						if n:find(w, 1, true) then return true end
+					end
+				end
+			end
+		end
+		return false
+	end
+	if attrsVault(character) or attrsVault(LP) or attrsVault(character:FindFirstChild("CheckInterractable")) then
+		return true
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if animator then
+		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if ok and tracks then
+			for _, playing in ipairs(tracks) do
+				local label = ""
+				pcall(function()
+					label = string.lower(tostring(playing.Name) .. " " .. tostring(playing.Animation and playing.Animation.Name or ""))
+				end)
+				if label ~= "" and not label:find("parry", 1, true) then
+					for _, w in ipairs(KINON_VaultWords) do
+						if label:find(w, 1, true) then return true end
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
 local function KINON_SafetyBlocksParry(character, close)
 	if not KINON_SafetyOn() then return false end
 	if not KINON_SafeToParry(character) then
@@ -6551,6 +6650,9 @@ local function KINON_SafetyBlocksParry(character, close)
 	end
 	if KINON_ActionBusy(character) then
 		return true, "Safety Parry: sedang melakukan aksi"
+	end
+	if KINON_VaultBusy(character) then
+		return true, "Safety Parry: sedang vault"
 	end
 	if close then return false end
 	local E = KINON_ParryEngine
@@ -6658,7 +6760,6 @@ local function KINON_InRangeAndFacing(killerRoot, playerRoot, positionOverride, 
 	local distance = ((positionOverride or killerRoot.Position) - playerRoot.Position).Magnitude
 	local range = math.clamp(tonumber(Parry.Range) or 14, 5, 35)
 		+ math.clamp(tonumber(Parry.ReachBonus) or 0, 0, 10)
-	if isLunge then range = math.max(range, 6) end
 	if isOptional then range = math.max(range, 20) end
 	if distance > range then return false end
 	if not KINON_ShouldPassFaceCheck(killerRoot, playerRoot) then return false end
@@ -6731,6 +6832,36 @@ local function KINON_KillerDoingObjectAction(model, currentTrack)
 	return false
 end
 
+local function KINON_KillerStunned(model)
+	if not model then return false end
+	local function stunAttr(inst)
+		if not inst then return false end
+		local ok, attrs = pcall(function() return inst:GetAttributes() end)
+		if not ok or type(attrs) ~= "table" then return false end
+		for name, value in pairs(attrs) do
+			local n = string.lower(tostring(name))
+			if n:find("stun", 1, true) or n:find("dizzy", 1, true) or n:find("paralyz", 1, true) then
+				if value == true or (type(value) == "number" and value > 0) then return true end
+			end
+		end
+		return false
+	end
+	if stunAttr(model) then return true end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if stunAttr(humanoid) or stunAttr(model:FindFirstChild("CheckInterractable")) then return true end
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if animator then
+		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if ok and tracks then
+			for _, playing in ipairs(tracks) do
+				local label = KINON_TrackLabel(playing)
+				if label:find("stun", 1, true) or label:find("dizzy", 1, true) then return true end
+			end
+		end
+	end
+	return false
+end
+
 local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge, isOptional)
 
 	local lead = 0.18
@@ -6797,6 +6928,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
 			if pass0 and (killerRoot0.Position - playerRoot0.Position).Magnitude > 9
 				and KINON_KillerDoingObjectAction(model, animTrack) then pass0 = false end
+			if pass0 and KINON_KillerStunned(model) then pass0 = false end
 			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0, true) then return end
 		end
 	end
@@ -6827,6 +6959,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 					and KINON_KillerDoingObjectAction(model, animTrack) then
 					pass = false
 				end
+				if pass and KINON_KillerStunned(model) then pass = false end
 				if pass then
 					local wasFirst = firstPass
 					firstPass = false
@@ -6862,6 +6995,7 @@ local function KINON_EarlyAttack(model, isLunge)
 	local pass = KINON_ParryInRange(killerRoot, playerRoot, killerRoot.AssemblyLinearVelocity, isLunge == true)
 	if pass and (killerRoot.Position - playerRoot.Position).Magnitude > 9
 		and KINON_KillerDoingObjectAction(model, nil) then pass = false end
+	if pass and KINON_KillerStunned(model) then pass = false end
 	if pass then KINON_TryParry("Early", killerRoot, true) end
 end
 
@@ -6873,7 +7007,7 @@ track(RunService.PreSimulation:Connect(function()
 	local playerRoot = getRoot()
 	if not playerRoot then return end
 	local now = tick()
-	if now - KINON_PollAt > 0.05 then
+	if now - KINON_PollAt > 0.1 then
 		KINON_PollAt = now
 		KINON_PollList = KINON_GetKillerModels()
 	end
@@ -6972,7 +7106,7 @@ task.spawn(function()
 					if animator then KINON_HookAnimator(animator, model) end
 				end
 			end
-			task.wait(0.04)
+			task.wait(0.08)
 		else
 			task.wait(0.35)
 		end
@@ -8695,7 +8829,6 @@ statsLockToggleHandle = interface:toggle("Lock FPS Counter", false, function(val
     statsLocked = value
     if applyStatsLockVisual then applyStatsLockVisual() end
 end)
-interface:toggle("Notifications", true)
 
 local runAutoload
 do
@@ -10648,7 +10781,7 @@ do
 	}, function() return s.RangeColor end, function(c) s.RangeColor = c end)
 
 	addSlider(card, "Face Sensitivity", "scan-face", 0, 10,
-		function() return math.clamp(math.floor(tonumber(s.FaceSensitivity) or 10), 0, 10) end,
+		function() return math.clamp(math.floor(tonumber(s.FaceSensitivity) or 6), 0, 10) end,
 		function(v) s.FaceSensitivity = v; s.FaceBias = v; sync() end)
 
 	addCheckbox(card, "Aggressive Mode", "zap",
@@ -10727,7 +10860,7 @@ do
 	}, function() return s.RangeColor end, function(c) s.RangeColor = c end)
 
 	addSlider(card, "Face Sensitivity", "scan-face", 0, 10,
-		function() return math.clamp(math.floor(tonumber(s.FaceSensitivity) or 10), 0, 10) end,
+		function() return math.clamp(math.floor(tonumber(s.FaceSensitivity) or 6), 0, 10) end,
 		function(v) s.FaceSensitivity = v; sync() end)
 
 	addCheckbox(card, "Aggressive Mode", "zap",
@@ -13256,6 +13389,18 @@ do
 	local lastId = nil
 	local korless = { on = false, conn = nil }
 	local usernameInput = ""
+	local presetUser = ""
+	local presetUserIds = {}
+	local PRESET_USER_LIST = {
+"xn1vyu", "nurblomst2013", "kino_yk", "nvratee",
+"Sakaryle", "Grouchy1400", "Kill_xsu", "Jahxure", "IIIlIIllIlIIIlII",
+"LordTherion", "xKami3D", "116vv", "444jamesss", "kiicaine",
+"fluvvvvy", "laikaa116", "d4vourz", "penyihirkoji", "itzSannz",
+"cinhsi", "ausenndipity", "GatoVeZ77", "y0urchocoo", "REZZ_MODEO",
+"Rev_Z6p", "4Dliii", "EDENinabobo", "farrooy", "judann_7",
+"ottawa4321", "kazeewww", "erxzha", "lakotree_Doang", "ybvarrr",
+"ba1mmms", "Anett_oooo",
+	}
 	local busy = false
 	local card
 
@@ -13582,20 +13727,39 @@ do
 		end
 	end
 
+	local BODY_FIELDS = { "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg" }
+
 	local function descApply(id, humanoid, override)
 		local desc = override
 		if not desc then
-			local ok, d = pcall(function() return Players:GetHumanoidDescriptionFromUserId(id) end)
-			if not ok or not d then return false end
-			desc = d
+			for _ = 1, 3 do
+				local ok, d = pcall(function() return Players:GetHumanoidDescriptionFromUserId(id) end)
+				if ok and d then desc = d break end
+				task.wait(0.4)
+			end
+			if not desc then return false end
 		end
-		local applied = pcall(function() humanoid:ApplyDescriptionReset(desc) end)
-		if not applied then applied = pcall(function() humanoid:ApplyDescription(desc) end) end
-		if not applied then return false end
-		task.wait(0.4)
-		local okA, cur = pcall(function() return humanoid:GetAppliedDescription() end)
-		if not okA or not cur then return false end
-		return cur.Shirt == desc.Shirt and cur.Pants == desc.Pants and cur.Face == desc.Face
+		local core = false
+		for attempt = 1, 4 do
+			if not humanoid.Parent then return false end
+			local applied = pcall(function() humanoid:ApplyDescriptionReset(desc) end)
+			if not applied then applied = pcall(function() humanoid:ApplyDescription(desc) end) end
+			if not applied then
+				task.wait(0.3)
+			else
+				task.wait(0.35 + 0.15 * attempt)
+				local okA, cur = pcall(function() return humanoid:GetAppliedDescription() end)
+				if okA and cur then
+					core = cur.Shirt == desc.Shirt and cur.Pants == desc.Pants and cur.Face == desc.Face
+					local bodyOk = true
+					for _, f in ipairs(BODY_FIELDS) do
+						if cur[f] ~= desc[f] then bodyOk = false break end
+					end
+					if core and bodyOk then return true end
+				end
+			end
+		end
+		return core
 	end
 
 	local function applyAvatar(id)
@@ -13636,6 +13800,14 @@ do
 			if n then return n end
 			local ok, id = pcall(function() return Players:GetUserIdFromNameAsync(usernameInput) end)
 			if not ok or not id then return nil, "User not found" end
+			return id
+		end
+		if source == "presetuser" then
+			local cached = presetUserIds[presetUser]
+			if cached then return cached end
+			local ok, id = pcall(function() return Players:GetUserIdFromNameAsync(presetUser) end)
+			if not ok or not id then return nil, "User not found" end
+			presetUserIds[presetUser] = id
 			return id
 		end
 		return selectedId
@@ -13694,13 +13866,21 @@ do
 		"Wildes", "Talon", "Relukt", "Sammy", "Diesel", "S4ans03", "Aura", "iJava", "White Guy",
 		"Purple King", "Kachaaaa Gay", "Mpruyyy",
 	}
+	for _, n in ipairs(PRESET_USER_LIST) do
+		PRESET_ORDER[#PRESET_ORDER + 1] = n
+	end
 	addDropdown(card, "Preset Avatars", "layers", PRESET_ORDER,
 		function(v) return v end,
 		function() return presetName end,
 		function(v)
 			presetName = v
-			selectedId = PRESET_IDS[v] or LP.UserId
-			source = "preset"
+			if PRESET_IDS[v] then
+				selectedId = PRESET_IDS[v]
+				source = "preset"
+			else
+				presetUser = v
+				source = "presetuser"
+			end
 		end)
 
 	local ctrl = addOption(card, "Username / ID", "user")
@@ -14300,6 +14480,7 @@ do
 	local FPY = State.FakeParry
 	local ParryFloatOn = false
 	local FAKE_ANIMS = {
+		["Default Skin"]        = "rbxassetid://109133187196613",
 		["Enten"]               = "rbxassetid://127096285501517",
 		["Stopwatch"]           = "rbxassetid://81793464499285",
 		["Fih"]                 = "rbxassetid://123307242865945",
@@ -14308,7 +14489,7 @@ do
 		["Vampire Lord Scythe"] = "rbxassetid://117821101412772",
 		["Diamond Sword"]       = "rbxassetid://85288374151888",
 	}
-	local FAKE_ORDER = { "Enten", "Stopwatch", "Fih", "Blood Shield", "Frying Pan", "Vampire Lord Scythe", "Diamond Sword" }
+	local FAKE_ORDER = { "Default Skin", "Enten", "Stopwatch", "Fih", "Blood Shield", "Frying Pan", "Vampire Lord Scythe", "Diamond Sword" }
 	local currentTrack, floatGui
 
 	local function playFakeParry()
@@ -14389,8 +14570,8 @@ do
 
 		task.defer(function()
 			if not frame.Parent then return end
-			local camera = workspace.CurrentCamera
-			local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
+			local viewport = gui.AbsoluteSize
+			if viewport.X < 10 then viewport = Vector2.new(800, 600) end
 			local width = math.clamp(math.ceil(title.TextBounds.X) + 26, 116, 166)
 			frame.Size = UDim2.fromOffset(width, 38)
 			local pos = frame.Position
@@ -14411,7 +14592,10 @@ do
 		btn.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 				pressed, moved, active = true, false, input
-				startPtr, startAbs = input.Position, frame.AbsolutePosition
+				local gs = gui.AbsoluteSize
+				local pos = frame.Position
+				startPtr = input.Position
+				startAbs = Vector2.new(pos.X.Scale * gs.X + pos.X.Offset, pos.Y.Scale * gs.Y + pos.Y.Offset)
 			end
 		end)
 		local function moveButton(input)
@@ -14420,8 +14604,8 @@ do
 				local d = input.Position - startPtr
 				if d.Magnitude > 6 then moved = true end
 				if moved then
-					local cam = workspace.CurrentCamera
-					local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+					local vp = gui.AbsoluteSize
+					if vp.X < 10 then vp = Vector2.new(800, 600) end
 					frame.Position = UDim2.fromOffset(
 						math.clamp(startAbs.X + d.X, 0, math.max(0, vp.X - frame.AbsoluteSize.X)),
 						math.clamp(startAbs.Y + d.Y, 0, math.max(0, vp.Y - frame.AbsoluteSize.Y)))
