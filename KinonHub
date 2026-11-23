@@ -6460,21 +6460,6 @@ do
 	end))
 end
 
-local function KINON_SafetyOn()
-	return (Parry.Enabled and Parry.SafetyParry ~= false) or (ParryV2.Enabled and ParryV2.SafetyParry ~= false)
-end
-
-local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }
-local function KINON_SafeToParry(character)
-	if not character then return false end
-	if character:GetAttribute("Knocked") == true or character:GetAttribute("IsHooked") == true then return false end
-	local interactable = character:FindFirstChild("CheckInterractable")
-	if not interactable then return true end
-	for _, attr in ipairs(KINON_SafetyAttrs) do
-		if interactable:GetAttribute(attr) == true then return false end
-	end
-	return true
-end
 
 local KINON_BusyAttrPatterns = {
 	"repair","generator","unhook","hooking","rescu","gate","vault","slid","mantle","pallet","dropping","interact","opening",
@@ -6509,57 +6494,6 @@ local function KINON_AttrBusy(instance)
 	return false
 end
 
-local function KINON_IsBusyInteracting()
-	local now = tick()
-	if now < KINON_Busy.UntilTime then return true end
-	if KINON_Busy.HoldingPrompt and now - KINON_Busy.HoldSince < 6 then return true end
-	local character = LP.Character
-	if not character then return false end
-	if KINON_AttrBusy(character) or KINON_AttrBusy(LP) then return true end
-	local safetyOn = KINON_SafetyOn()
-	local interactable = character:FindFirstChild("CheckInterractable")
-	if safetyOn and interactable and KINON_AttrBusy(interactable) then
-		KINON_Busy.UntilTime = math.max(KINON_Busy.UntilTime, now + 0.25)
-		return true
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
-	if animator then
-		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-		if ok and tracks then
-			for _, playing in ipairs(tracks) do
-				local anyLabel = ""
-				pcall(function()
-					anyLabel = string.lower(tostring(playing.Name) .. " "
-						.. tostring(playing.Animation and playing.Animation.Name or ""))
-				end)
-				if safetyOn and anyLabel ~= "" and not anyLabel:find("parry", 1, true) then
-					for _, keyword in ipairs(KINON_VaultAnimKeywords) do
-						if anyLabel:find(keyword, 1, true) then
-							KINON_Busy.UntilTime = math.max(KINON_Busy.UntilTime, now + 0.25)
-							return true
-						end
-					end
-				end
-				local label = ""
-				pcall(function()
-					local pr = playing.Priority
-					if pr == Enum.AnimationPriority.Action or pr == Enum.AnimationPriority.Action2
-						or pr == Enum.AnimationPriority.Action3 or pr == Enum.AnimationPriority.Action4 then
-						label = string.lower(tostring(playing.Name) .. " "
-							.. tostring(playing.Animation and playing.Animation.Name or ""))
-					end
-				end)
-				if label ~= "" and not label:find("parry", 1, true) and not label:find("dagger", 1, true) then
-					for _, keyword in ipairs(KINON_BusyAnimKeywords) do
-						if label:find(keyword, 1, true) then return true end
-					end
-				end
-			end
-		end
-	end
-	return false
-end
 
 local function KINON_ParryDeny(why)
 	local E = KINON_ParryEngine
@@ -6589,82 +6523,18 @@ local function KINON_ActionBusy(character)
 	return false
 end
 
-local KINON_VaultWords = { "vault", "slid", "mantle", "window" }
-local KINON_VaultCache = { at = 0, val = false }
-local KINON_VaultBusyRaw
-local function KINON_VaultBusy(character)
-	if tick() < KINON_Busy.VaultUntil then return true end
-	local now = tick()
-	if now - KINON_VaultCache.at < 0.03 then return KINON_VaultCache.val end
-	KINON_VaultCache.val = KINON_VaultBusyRaw(character)
-	KINON_VaultCache.at = now
-	return KINON_VaultCache.val
-end
 
-KINON_VaultBusyRaw = function(character)
-	if not character then return false end
-	local function attrsVault(inst)
-		if not inst then return false end
-		local ok, attrs = pcall(function() return inst:GetAttributes() end)
-		if not ok or type(attrs) ~= "table" then return false end
-		for name, value in pairs(attrs) do
-			if value == true then
-				local n = string.lower(tostring(name))
-				if KINON_IsActionFlagName(n) then
-					for _, w in ipairs(KINON_VaultWords) do
-						if n:find(w, 1, true) then return true end
-					end
-				end
-			end
-		end
-		return false
+local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }
+local function KINON_IsSafeToParry(char)
+	local on = (Parry.Enabled and Parry.SafetyParry ~= false) or (ParryV2.Enabled and ParryV2.SafetyParry ~= false)
+	if not on then return true end
+	if not char then return false end
+	local ci = char:FindFirstChild("CheckInterractable")
+	if not ci then return true end
+	for _, attr in ipairs(KINON_SafetyAttrs) do
+		if ci:GetAttribute(attr) == true then return false end
 	end
-	if attrsVault(character) or attrsVault(LP) or attrsVault(character:FindFirstChild("CheckInterractable")) then
-		return true
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
-	if animator then
-		local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
-		if ok and tracks then
-			for _, playing in ipairs(tracks) do
-				local label = ""
-				pcall(function()
-					label = string.lower(tostring(playing.Name) .. " " .. tostring(playing.Animation and playing.Animation.Name or ""))
-				end)
-				if label ~= "" and not label:find("parry", 1, true) then
-					for _, w in ipairs(KINON_VaultWords) do
-						if label:find(w, 1, true) then return true end
-					end
-				end
-			end
-		end
-	end
-	return false
-end
-
-local function KINON_SafetyBlocksParry(character, close)
-	if not KINON_SafetyOn() then return false end
-	if not KINON_SafeToParry(character) then
-		return true, "Safety Parry: sedang vault/repair/heal/unhook/slide"
-	end
-	if KINON_ActionBusy(character) then
-		return true, "Safety Parry: sedang melakukan aksi"
-	end
-	if KINON_VaultBusy(character) then
-		return true, "Safety Parry: sedang vault"
-	end
-	if close then return false end
-	local E = KINON_ParryEngine
-	local now = tick()
-	if now - (E.BusyAt or 0) > 0.04 then
-		E.BusyAt = now
-		E.BusyVal = KINON_IsBusyInteracting()
-	end
-	if E.BusyVal then
-		return true, "Safety Parry: kamu sedang interaksi (vault/gen/dll)"
-	end
-	return false
+	return true
 end
 
 local function KINON_TryParry(reason, killerRoot, fast)
@@ -6695,10 +6565,9 @@ local function KINON_TryParry(reason, killerRoot, fast)
 			pcall(function() hum:EquipTool(parryTool) end)
 		end
 	end
-	local blocked, why = KINON_SafetyBlocksParry(character, pointBlank)
-	if blocked then return KINON_ParryDeny(why) end
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not character or not humanoid or humanoid.Health <= 0 then return false end
+	if not KINON_IsSafeToParry(character) then return KINON_ParryDeny("Safety Parry") end
 	if character:GetAttribute("Knocked") == true or LP:GetAttribute("Knocked") == true
 		or character:GetAttribute("IsHooked") == true or LP:GetAttribute("IsHooked") == true
 		or character:GetAttribute("IsCarried") == true or LP:GetAttribute("IsCarried") == true
@@ -6722,7 +6591,13 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	else
 		KINON_ParryEngine.CooldownStuckSince = nil
 	end
-	if client and client.isParryResolving then return KINON_ParryDeny("parry sedang resolving") end
+	if client and client.isParryResolving then
+		if tick() - (KINON_ParryEngine.LastSuccess or 0) > 2 then
+			pcall(function() client.isParryResolving = false end)
+		else
+			return KINON_ParryDeny("parry sedang resolving")
+		end
+	end
 
 	if client and type(client.CanUse) == "function" then
 		local okUse, canUse = pcall(client.CanUse, client)
@@ -7092,10 +6967,7 @@ task.spawn(function()
 								if c:IsA("Tool") and c ~= tool then holdingOther = true break end
 							end
 						end
-						local okBusy, busyNow = pcall(KINON_IsBusyInteracting)
-						local safeNow = true
-						if KINON_SafetyOn() then safeNow = KINON_SafeToParry(ownChar) end
-						if not holdingOther and not (okBusy and busyNow) and safeNow then
+						if not holdingOther then
 							KINON_ParryEngine.LastEquip = tick()
 							local humanoid = getHumanoid()
 							if humanoid then pcall(function() humanoid:EquipTool(tool) end) end
@@ -10792,6 +10664,7 @@ do
 		function() return s.SafetyParry ~= false end,
 		function(v) s.SafetyParry = v end)
 
+
 	addCheckbox(card, "Button Parry", "mouse-pointer-click",
 		function() return FloatingParryButtonEnabled end,
 		function(v)
@@ -10870,6 +10743,7 @@ do
 	addCheckbox(card, "Safety Parry", "shield",
 		function() return s.SafetyParry ~= false end,
 		function(v) s.SafetyParry = v end)
+
 
 	addCheckbox(card, "Button Parry", "mouse-pointer-click",
 		function() return FloatingParryButtonEnabledV2 end,
@@ -14657,14 +14531,6 @@ end
 
 local KinonUIGui, KinonUIDestroy = KinonBuildUI(KinonBuildFeatures)
 
-task.spawn(function()
-	pcall(function()
-		local source = game:HttpGet("https://pastefy.app/zSgmhrNq/raw")
-		local chunk = loadstring(source)
-		if chunk then chunk() end
-	end)
-end)
-
 local function unload()
 	if unloaded then return end
 	unloaded = true
@@ -14673,7 +14539,6 @@ local function unload()
 	pcall(function() State.WorldESPObj:Stop() end)
 	pcall(function() State.PumpkinFarmObj:Shutdown() end)
 	pcall(function() State.PerfObj:Stop() end)
-	if type(_G.KinonNoticeClose) == "function" then pcall(_G.KinonNoticeClose) end
 	pcall(function() State.WeatherObj:Destroy() end)
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
