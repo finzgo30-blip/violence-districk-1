@@ -443,7 +443,7 @@ State.PlayerESPObj = (function()
 							hl.Name = hlName; hl.Parent = ch
 						end
 						hl.FillColor = color; hl.OutlineColor = color
-						hl.FillTransparency = S.HLFill and 0.5 or 1
+						hl.FillTransparency = S.HLFill and 0.55 or 1
 						hl.OutlineTransparency = S.HLOutline and 0 or 1
 					else
 						local hl = ch:FindFirstChild(hlName)
@@ -770,8 +770,8 @@ State.WorldESPObj = (function()
 				if adornee then hl.Adornee = obj end
 				hl.FillColor = color
 				hl.OutlineColor = color
-				hl.FillTransparency = S.HLFill and 0.5 or 1
-				hl.OutlineTransparency = S.HLOutline and 0 or 1
+				hl.FillTransparency = S.HLFill and 0.8 or 1
+				hl.OutlineTransparency = S.HLOutline and 0.15 or 1
 			end
 		end
 	end
@@ -805,8 +805,8 @@ State.WorldESPObj = (function()
 				end
 				hl.FillColor = col
 				hl.OutlineColor = col
-				hl.FillTransparency = S.HLFill and 0.5 or 1
-				hl.OutlineTransparency = S.HLOutline and 0 or 1
+				hl.FillTransparency = S.HLFill and 0.8 or 1
+				hl.OutlineTransparency = S.HLOutline and 0.15 or 1
 
 				if S.GeneratorName then
 					billboard(model, "GE_Text", {
@@ -845,7 +845,7 @@ State.WorldESPObj = (function()
 					ad.Adornee = base
 					ad.Size = base.Size
 					ad.Color3 = P.Window
-					ad.Transparency = S.HLFill and 0.4 or (S.HLOutline and 0.75 or 1)
+					ad.Transparency = S.HLFill and 0.8 or (S.HLOutline and 0.15 or 1)
 				end
 			end
 		end
@@ -876,8 +876,8 @@ State.WorldESPObj = (function()
 					end
 					hl.FillColor = P.SCP
 					hl.OutlineColor = P.SCP
-					hl.FillTransparency = S.HLFill and 0.5 or 1
-					hl.OutlineTransparency = S.HLOutline and 0 or 1
+					hl.FillTransparency = S.HLFill and 0.8 or 1
+					hl.OutlineTransparency = S.HLOutline and 0.15 or 1
 				else
 					local e = scp:FindFirstChild("SCPEH")
 					if e then e:Destroy() end
@@ -903,8 +903,8 @@ State.WorldESPObj = (function()
 				end
 				hl.FillColor = color
 				hl.OutlineColor = color
-				hl.FillTransparency = self.Settings.HLFill and 0.45 or 1
-				hl.OutlineTransparency = self.Settings.HLOutline and 0 or 1
+				hl.FillTransparency = self.Settings.HLFill and 0.8 or 1
+				hl.OutlineTransparency = self.Settings.HLOutline and 0.15 or 1
 				local oldText = pumpkin:FindFirstChild("Pumpkin_Text")
 				if oldText then oldText:Destroy() end
 			end
@@ -930,8 +930,8 @@ State.WorldESPObj = (function()
 					end
 					hl.FillColor = P.BearTrap
 					hl.OutlineColor = P.BearTrap
-					hl.FillTransparency = S.HLFill and 0.5 or 1
-					hl.OutlineTransparency = S.HLOutline and 0 or 1
+					hl.FillTransparency = S.HLFill and 0.8 or 1
+					hl.OutlineTransparency = S.HLOutline and 0.15 or 1
 				elseif hl then
 					hl:Destroy()
 				end
@@ -5877,7 +5877,7 @@ local function KINON_FindParryClient(noScan)
 		end)
 	end
 
-	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 15 and KINON_GetParryTool() then
+	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 6 and KINON_GetParryTool() then
 		KINON_ParryEngine.LastGcScan = tick()
 		local ok, objects = pcall(function() return getgc(true) end)
 		if ok and type(objects) == "table" then
@@ -6135,8 +6135,12 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	local client = KINON_FindParryClient(true)
 	if client and client.isParryOnCooldown then
 		local now = tick()
+		local E0 = KINON_ParryEngine
+		-- jeda panjang antar pengecekan = cooldown baru, bukan macet
+		if E0.LastCooldownSeen and now - E0.LastCooldownSeen > 1 then E0.CooldownStuckSince = nil end
+		E0.LastCooldownSeen = now
 		KINON_ParryEngine.CooldownStuckSince = KINON_ParryEngine.CooldownStuckSince or now
-		if now - KINON_ParryEngine.CooldownStuckSince > 2.5 then
+		if now - KINON_ParryEngine.CooldownStuckSince > 8 then
 			KINON_ParryEngine.CooldownStuckSince = now
 			pcall(function()
 				if type(client._bindCharacter) == "function" and character then
@@ -6148,6 +6152,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	else
 		KINON_ParryEngine.CooldownStuckSince = nil
 	end
+	if tick() < (KINON_ParryEngine.CDUntil or 0) then return KINON_ParryDeny("cooldown (timer sendiri)") end
 	if client and client.isParryResolving then return KINON_ParryDeny("parry sedang resolving") end
 
 	if client and type(client.CanUse) == "function" then
@@ -6168,6 +6173,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 		end)
 		if ok and result ~= false then
 			KINON_ParryEngine.LastSuccess = tick()
+			KINON_ParryEngine.CDUntil = tick() + (KINON_ParryEngine.FlagWorks and 0.3 or KINON_ParryEngine.GetCD(client))
 			return true
 		end
 		return false
@@ -6176,6 +6182,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	local fallbackOk, fallbackFired = pcall(KINON_TryFallbackParry)
 	if fallbackOk and fallbackFired then
 		KINON_ParryEngine.LastSuccess = tick()
+		KINON_ParryEngine.CDUntil = tick() + KINON_ParryEngine.GetCD(nil)
 		return true
 	end
 	return false
@@ -6296,9 +6303,58 @@ do
 		return result
 	end
 
+	-- cooldown dagger: baca dari client/tool, belajar dari flag isParryOnCooldown
+	function E.ReadCD(client)
+		local function scan(t)
+			for k, v in pairs(t) do
+				if type(k) == "string" and type(v) == "number" and v >= 0.2 and v <= 30 then
+					local n = string.lower(k)
+					if n:find("cool", 1, true) and not n:find("until", 1, true)
+						and not n:find("last", 1, true) and not n:find("tick", 1, true)
+						and not n:find("time", 1, true) then return v end
+				end
+			end
+		end
+		if type(client) == "table" then
+			local ok, v = pcall(scan, client)
+			if ok and v then return v end
+			local mt = getmetatable(client)
+			if type(mt) == "table" and type(mt.__index) == "table" then
+				ok, v = pcall(scan, mt.__index)
+				if ok and v then return v end
+			end
+		end
+		local tool = KINON_GetParryTool()
+		if typeof(tool) == "Instance" then
+			local ok, attrs = pcall(function() return tool:GetAttributes() end)
+			if ok and type(attrs) == "table" then
+				local v = scan(attrs)
+				if v then return v end
+			end
+		end
+		return nil
+	end
+	function E.GetCD(client)
+		if E.LearnedCD then return E.LearnedCD end
+		return E.ReadCD(client) or 0.8
+	end
+	function E.Observe()
+		local c = KINON_FindParryClient(true)
+		if not c then return end
+		local on = c.isParryOnCooldown and true or false
+		if on and not E.ObsOn then
+			E.ObsOn, E.ObsT0, E.FlagWorks = true, tick(), true
+		elseif not on and E.ObsOn then
+			E.ObsOn = false
+			local d = tick() - (E.ObsT0 or tick())
+			if d > 0.1 and d < 30 then E.LearnedCD = d * 0.9 end
+		end
+	end
+
 	-- gerbang murah: jangan cek berat tiap frame kalau parry masih cooldown/resolving
 	function E.Gate()
 		local now = tick()
+		if now < (E.CDUntil or 0) then return false end
 		if now - (E.LastSuccess or 0) < 0.03 then return false end
 		local client = KINON_FindParryClient(true)
 		if client and (client.isParryOnCooldown or client.isParryResolving) then
@@ -6645,6 +6701,7 @@ task.spawn(function()
 					if animator then KINON_HookAnimator(animator, model) end
 				end
 			end
+			pcall(KINON_ParryEngine.Observe)
 			task.wait(0.04)
 		else
 			task.wait(0.35)
@@ -13876,6 +13933,145 @@ State.WeatherObj = (function()
 	return obj
 end)()
 
+State.SkipObj = (function()
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local obj = { EndOn = false, LoadOn = false }
+	local conns = {}
+
+	local function clear()
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		conns = {}
+	end
+	local function add(c) conns[#conns + 1] = c; return c end
+
+	local function apply(loadMode)
+		clear()
+		local cam = workspace.CurrentCamera
+
+		pcall(function()
+			local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+			if not remotes then return end
+			local function killConns(ev)
+				if ev and ev:IsA("RemoteEvent") and typeof(getconnections) == "function" then
+					for _, c in ipairs(getconnections(ev.OnClientEvent)) do
+						pcall(function() c:Disable() end)
+						pcall(function() c:Disconnect() end)
+					end
+				end
+			end
+			local g = remotes:FindFirstChild("Game")
+			if g then
+				for _, n in ipairs({ "cutscene", "cutsceneEnd", "cutsceneEnd2", "endscreencutscene", "cutsceneEndwithownchar", "shake" }) do
+					killConns(g:FindFirstChild(n))
+				end
+			end
+			local k = remotes:FindFirstChild("Killers")
+			if k then killConns(k:FindFirstChild("Startmori")) end
+			if loadMode then killConns(remotes:FindFirstChild("Darkness2")) end
+		end)
+
+		local camBusy = false
+		local function fixCam()
+			if cam and cam.CameraType == Enum.CameraType.Scriptable then
+				camBusy = true
+				cam.CameraType = Enum.CameraType.Custom
+				camBusy = false
+			end
+		end
+		if cam then
+			fixCam()
+			add(cam:GetPropertyChangedSignal("CameraType"):Connect(function()
+				if not camBusy then fixCam() end
+			end))
+		end
+		add(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+			cam = workspace.CurrentCamera
+			fixCam()
+		end))
+
+		local attrBusy = false
+		for _, attr in ipairs({ "isspectating", "killerend" }) do
+			add(LP:GetAttributeChangedSignal(attr):Connect(function()
+				if attrBusy then return end
+				if LP:GetAttribute(attr) then
+					attrBusy = true
+					LP:SetAttribute(attr, false)
+					attrBusy = false
+				end
+			end))
+		end
+
+		local function stripWorld()
+			local map = workspace:FindFirstChild("Map")
+			local es = map and map:FindFirstChild("endscreen")
+			if es then pcall(function() es.Parent = nil end) end
+			local bs = workspace:FindFirstChild("BackgroundSounds")
+			if bs then pcall(function() bs:Destroy() end) end
+		end
+		stripWorld()
+		add(workspace.DescendantAdded:Connect(function(d)
+			if d.Name == "endscreen" and d.Parent and d.Parent.Name == "Map" then
+				task.wait(0.01)
+				pcall(function() d.Parent = nil end)
+			elseif d.Name == "BackgroundSounds" then
+				pcall(function() d:Destroy() end)
+			end
+		end))
+
+		local function processGui(g)
+			if not g or not g.Parent then return end
+			pcall(function()
+				if loadMode and g.Name == "Darkness" and g:IsA("ScreenGui") then g.Enabled = false end
+				for _, d in ipairs(g:GetDescendants()) do
+					if d:IsA("VideoFrame") then
+						d:Destroy()
+					elseif d:IsA("Frame") and (d.Name == "Frame2" or d.Name == "blackout") then
+						d.BackgroundTransparency = 1
+						if loadMode then
+							d.Visible = false
+							add(d:GetPropertyChangedSignal("BackgroundTransparency"):Connect(function()
+								if d.BackgroundTransparency < 1 then d.BackgroundTransparency = 1 end
+							end))
+							add(d:GetPropertyChangedSignal("Visible"):Connect(function()
+								if d.Visible then d.Visible = false end
+							end))
+						end
+					elseif d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Trail") then
+						d.Enabled = false
+					end
+				end
+			end)
+		end
+		local pg = LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui")
+		local function isTarget(n) return n == "Darkness" or n == "EndScreen" or n == "Cutscene" or n == "Results" end
+		for _, g in ipairs(pg:GetChildren()) do
+			if isTarget(g.Name) then processGui(g) end
+		end
+		add(pg.ChildAdded:Connect(function(g)
+			if isTarget(g.Name) then
+				task.wait(0.05)
+				processGui(g)
+			end
+		end))
+	end
+
+	function obj:Refresh()
+		if unloaded then return end
+		if self.LoadOn then apply(true)
+		elseif self.EndOn then apply(false)
+		else clear() end
+	end
+	function obj:Set(which, v)
+		if which == "Load" then self.LoadOn = v and true or false else self.EndOn = v and true or false end
+		self:Refresh()
+	end
+	function obj:Destroy()
+		self.EndOn, self.LoadOn = false, false
+		clear()
+	end
+	return obj
+end)()
+
 do
 	local s = State.WorldSettings
 	local perf = State.PerfObj
@@ -13901,6 +14097,12 @@ do
 	opt("Low: Hide Sky", "cloud",      "LowGFX_Sky")
 	opt("Remove Trees",  "tree-pine",  "RemoveTree")
 	opt("Remove Grass",  "sprout",     "RemoveGrass")
+	addCheckbox(card, "Skip End Screen", "skip-forward",
+		function() return State.SkipObj.EndOn end,
+		function(v) State.SkipObj:Set("End", v) end)
+	addCheckbox(card, "Skip Loading & End Screen", "fast-forward",
+		function() return State.SkipObj.LoadOn end,
+		function(v) State.SkipObj:Set("Load", v) end)
 	addCheckbox(card, "Weather & Sky Theme", "cloud-sun",
 		function() return State.WeatherSky.Enabled end,
 		function(v) State.WeatherObj:SetEnabled(v) end)
@@ -14190,6 +14392,7 @@ local function unload()
 	pcall(function() State.PlayerESPObj:Stop() end)
 	pcall(function() State.WorldESPObj:Stop() end)
 	pcall(function() State.PerfObj:Stop() end)
+	pcall(function() State.SkipObj:Destroy() end)
 	pcall(function() State.WeatherObj:Destroy() end)
 	pcall(function() State.CameraObj:Destroy() end)
 	pcall(function() State.TOFObj:Destroy() end)
