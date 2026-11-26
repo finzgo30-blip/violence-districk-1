@@ -443,7 +443,7 @@ State.PlayerESPObj = (function()
 							hl.Name = hlName; hl.Parent = ch
 						end
 						hl.FillColor = color; hl.OutlineColor = color
-						hl.FillTransparency = S.HLFill and 0.55 or 1
+						hl.FillTransparency = S.HLFill and 0.7 or 1
 						hl.OutlineTransparency = S.HLOutline and 0 or 1
 					else
 						local hl = ch:FindFirstChild(hlName)
@@ -770,8 +770,8 @@ State.WorldESPObj = (function()
 				if adornee then hl.Adornee = obj end
 				hl.FillColor = color
 				hl.OutlineColor = color
-				hl.FillTransparency = S.HLFill and 0.8 or 1
-				hl.OutlineTransparency = S.HLOutline and 0.15 or 1
+				hl.FillTransparency = S.HLFill and 0.7 or 1
+				hl.OutlineTransparency = S.HLOutline and 0 or 1
 			end
 		end
 	end
@@ -805,8 +805,8 @@ State.WorldESPObj = (function()
 				end
 				hl.FillColor = col
 				hl.OutlineColor = col
-				hl.FillTransparency = S.HLFill and 0.8 or 1
-				hl.OutlineTransparency = S.HLOutline and 0.15 or 1
+				hl.FillTransparency = S.HLFill and 0.7 or 1
+				hl.OutlineTransparency = S.HLOutline and 0 or 1
 
 				if S.GeneratorName then
 					billboard(model, "GE_Text", {
@@ -845,7 +845,7 @@ State.WorldESPObj = (function()
 					ad.Adornee = base
 					ad.Size = base.Size
 					ad.Color3 = P.Window
-					ad.Transparency = S.HLFill and 0.8 or (S.HLOutline and 0.15 or 1)
+					ad.Transparency = S.HLFill and 0.7 or (S.HLOutline and 0.1 or 1)
 				end
 			end
 		end
@@ -876,8 +876,8 @@ State.WorldESPObj = (function()
 					end
 					hl.FillColor = P.SCP
 					hl.OutlineColor = P.SCP
-					hl.FillTransparency = S.HLFill and 0.8 or 1
-					hl.OutlineTransparency = S.HLOutline and 0.15 or 1
+					hl.FillTransparency = S.HLFill and 0.7 or 1
+					hl.OutlineTransparency = S.HLOutline and 0 or 1
 				else
 					local e = scp:FindFirstChild("SCPEH")
 					if e then e:Destroy() end
@@ -903,8 +903,8 @@ State.WorldESPObj = (function()
 				end
 				hl.FillColor = color
 				hl.OutlineColor = color
-				hl.FillTransparency = self.Settings.HLFill and 0.8 or 1
-				hl.OutlineTransparency = self.Settings.HLOutline and 0.15 or 1
+				hl.FillTransparency = self.Settings.HLFill and 0.7 or 1
+				hl.OutlineTransparency = self.Settings.HLOutline and 0 or 1
 				local oldText = pumpkin:FindFirstChild("Pumpkin_Text")
 				if oldText then oldText:Destroy() end
 			end
@@ -930,8 +930,8 @@ State.WorldESPObj = (function()
 					end
 					hl.FillColor = P.BearTrap
 					hl.OutlineColor = P.BearTrap
-					hl.FillTransparency = S.HLFill and 0.8 or 1
-					hl.OutlineTransparency = S.HLOutline and 0.15 or 1
+					hl.FillTransparency = S.HLFill and 0.7 or 1
+					hl.OutlineTransparency = S.HLOutline and 0 or 1
 				elseif hl then
 					hl:Destroy()
 				end
@@ -1259,13 +1259,19 @@ State.SpearObj = (function()
 			local speedNow = walkSpeed
 			if fitFlat then
 				-- pakai kecepatan GERAK ASLI, bukan walkspeed penuh: gerak sedikit = lead sedikit
-				local along = fitFlat:Dot(moveFlat.Unit)
+				-- ambil yang terbesar antara hasil regresi dan kecepatan live (regresi telat saat mulai/belok)
+				local along = math.max(fitFlat:Dot(moveFlat.Unit), liveFlat:Dot(moveFlat.Unit))
 				if along > 1.5 then
-					speedNow = math.min(along * 1.05, walkSpeed)
-				elseif along < -1 then
-					speedNow = walkSpeed * 0.3
+					speedNow = math.min(along * 1.1, walkSpeed)
 				else
-					speedNow = math.max(fitFlat.Magnitude, 0) * 0.5
+					local fm = math.max(fitFlat.Magnitude, liveFlat.Magnitude)
+					if fm >= 4 then
+						-- target jelas bergerak tapi arahnya baru berubah: jangan sampai tanpa predict
+						speedNow = walkSpeed * 0.7
+					else
+						-- cuma gerak sedikit/tap: lead kecil
+						speedNow = fm * 0.5
+					end
 				end
 			else
 				speedNow = walkSpeed * 0.6
@@ -1308,7 +1314,7 @@ State.SpearObj = (function()
 		local gMag = math.abs(gVec.Y)
 		local farLead = math.clamp((dist - 40) / 120, 0, 1)
 		local latency = getPingHalf() + 0.03 + 0.06 * math.clamp((dist - 40) / 160, 0, 1)
-		local leadMul = 1.1 - 0.3 * farLead
+		local leadMul = 1.25 - 0.3 * farLead
 		local aimPoint = hrp.Position + Vector3.new(0, 0.2, 0)
 		local pickPart = V.AimPart
 		if pickPart == "Head" then
@@ -5257,14 +5263,42 @@ local function KINON_ShouldPassFaceCheck(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local sens = math.clamp(tonumber(Parry.FaceSensitivity) or 6, 0, 10) / 10
-	if sens <= 0 then return true end
-	local toMe = Vector3.new(playerRoot.Position.X - killerRoot.Position.X, 0, playerRoot.Position.Z - killerRoot.Position.Z)
-	if toMe.Magnitude < 3 then return true end
-	local look = killerRoot.CFrame.LookVector
-	look = Vector3.new(look.X, 0, look.Z)
-	if look.Magnitude < 0.05 then return true end
-	return look.Unit:Dot(toMe.Unit) >= math.clamp(-1 + (2 * sens), -1, 1)
+	local memo = Parry.FaceMemo
+	if not memo then
+		memo = setmetatable({}, { __mode = "k" })
+		Parry.FaceMemo = memo
+	end
+	local now = os.clock()
+	if memo[killerRoot] and now - memo[killerRoot] < 0.6 then
+		return true
+	end
+	local offset = playerRoot.Position - killerRoot.Position
+	local dist = offset.Magnitude
+	-- killer nempel (<= 6 studs): selalu lolos, tidak perlu menghadap tepat
+	if dist <= 6 then
+		return true
+	end
+	local dir = offset.Unit
+	local sensitivity = math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10
+	local maxAngle = 20 + sensitivity * 100
+	local cosLimit = math.cos(math.rad(maxAngle))
+	local passed = killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit
+	if not passed then
+		local model = killerRoot.Parent
+		local head = model and model:FindFirstChild("Head")
+		if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
+			passed = true
+		end
+	end
+	if not passed then
+		local vel = killerRoot.AssemblyLinearVelocity
+		if vel and vel.Magnitude > 8 then
+			local velLimit = math.cos(math.rad(math.min(maxAngle + 20, 150)))
+			if vel.Unit:Dot(dir) >= velLimit then passed = true end
+		end
+	end
+	if passed then memo[killerRoot] = now end
+	return passed
 end
 
 local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
@@ -5274,14 +5308,42 @@ local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
 	if not killerRoot or not playerRoot then
 		return false
 	end
-	local sens = math.clamp(tonumber(ParryV2.FaceSensitivity) or 6, 0, 10) / 10
-	if sens <= 0 then return true end
-	local toMe = Vector3.new(playerRoot.Position.X - killerRoot.Position.X, 0, playerRoot.Position.Z - killerRoot.Position.Z)
-	if toMe.Magnitude < 3 then return true end
-	local look = killerRoot.CFrame.LookVector
-	look = Vector3.new(look.X, 0, look.Z)
-	if look.Magnitude < 0.05 then return true end
-	return look.Unit:Dot(toMe.Unit) >= math.clamp(-1 + (2 * sens), -1, 1)
+	local memo = ParryV2.FaceMemo
+	if not memo then
+		memo = setmetatable({}, { __mode = "k" })
+		ParryV2.FaceMemo = memo
+	end
+	local now = os.clock()
+	if memo[killerRoot] and now - memo[killerRoot] < 0.6 then
+		return true
+	end
+	local offset = playerRoot.Position - killerRoot.Position
+	local dist = offset.Magnitude
+	-- killer nempel (<= 6 studs): selalu lolos, tidak perlu menghadap tepat
+	if dist <= 6 then
+		return true
+	end
+	local dir = offset.Unit
+	local sensitivity = math.clamp(tonumber(ParryV2.FaceSensitivity) or 10, 0, 10) / 10
+	local maxAngle = 20 + sensitivity * 100
+	local cosLimit = math.cos(math.rad(maxAngle))
+	local passed = killerRoot.CFrame.LookVector:Dot(dir) >= cosLimit
+	if not passed then
+		local model = killerRoot.Parent
+		local head = model and model:FindFirstChild("Head")
+		if head and head:IsA("BasePart") and head.CFrame.LookVector:Dot(dir) >= cosLimit then
+			passed = true
+		end
+	end
+	if not passed then
+		local vel = killerRoot.AssemblyLinearVelocity
+		if vel and vel.Magnitude > 8 then
+			local velLimit = math.cos(math.rad(math.min(maxAngle + 20, 150)))
+			if vel.Unit:Dot(dir) >= velLimit then passed = true end
+		end
+	end
+	if passed then memo[killerRoot] = now end
+	return passed
 end
 
 local function KINON_InRangeAndFacingV2(killerRoot, playerRoot, positionOverride, measuredVel, isLunge, isOptional)
@@ -6261,7 +6323,7 @@ do
 	end
 	task.spawn(function()
 		while not unloaded do
-			if Parry.Enabled or ParryV2.Enabled then pcall(scan); task.wait(20) else task.wait(1) end
+			if E.UseObjectGuard and (Parry.Enabled or ParryV2.Enabled) then pcall(scan); task.wait(20) else task.wait(1) end
 		end
 	end)
 	local function flat(v) return Vector3.new(v.X, 0, v.Z) end
@@ -6358,7 +6420,7 @@ do
 		if now - (E.LastSuccess or 0) < 0.03 then return false end
 		local client = KINON_FindParryClient(true)
 		if client and (client.isParryOnCooldown or client.isParryResolving) then
-			if now - (E.GateAt or 0) > 0.5 then E.GateAt = now; return true end
+			if now - (E.GateAt or 0) > 0.05 then E.GateAt = now; return true end
 			return false
 		end
 		return true
@@ -6490,23 +6552,9 @@ local function KINON_HandleAttackTrack(animTrack, model)
 	if optionalAttack and VD_SkipParryOptions[animationId] == true then return end
 	local knownAttack = KINON_KillerAttackIds[animationId] == true
 		or (optionalAttack ~= nil and optionalAttack.Default == true)
-	if KINON_LabelIsNonAttack(KINON_TrackLabel(animTrack)) then return end
-	if not knownAttack then
-		-- killer nempel: animasi Action yang belum terdaftar dianggap serangan
-		local myR0, kR0 = getRoot(), model:FindFirstChild("HumanoidRootPart")
-		local closeUnknown = false
-		if myR0 and kR0 and (kR0.Position - myR0.Position).Magnitude <= math.min(7, (tonumber(Parry.Enabled and Parry.Range or ParryV2.Range) or 14)) then
-			local pr
-			pcall(function() pr = animTrack.Priority end)
-			closeUnknown = pr == Enum.AnimationPriority.Action or pr == Enum.AnimationPriority.Action2
-				or pr == Enum.AnimationPriority.Action3 or pr == Enum.AnimationPriority.Action4
-		end
-		if not closeUnknown then return end
-	end
+	if not knownAttack then return end
 
 	local function timeLimit(killerRootX)
-		local myR = getRoot()
-		if killerRootX and myR and (killerRootX.Position - myR.Position).Magnitude <= 6 then return 0.85 end
 		return 0.45
 	end
 	local okTime, timePosition = pcall(function() return animTrack.TimePosition or 0 end)
@@ -6517,9 +6565,6 @@ local function KINON_HandleAttackTrack(animTrack, model)
 		local killerRoot0 = model:FindFirstChild("HumanoidRootPart")
 		if playerRoot0 and killerRoot0 then
 			local pass0 = KINON_ParryInRange(killerRoot0, playerRoot0, killerRoot0.AssemblyLinearVelocity, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
-			if pass0 and (KINON_ParryEngine.ObjectActionCached(model, animTrack)
-				or KINON_ParryEngine.NearObjectAction(model, playerRoot0, not knownAttack)) then pass0 = false end
-			if pass0 and KINON_KillerStunned(model) then pass0 = false end
 			if pass0 and KINON_TryParry("Instant " .. animationId, killerRoot0, true) then return end
 		end
 	end
@@ -6546,11 +6591,6 @@ local function KINON_HandleAttackTrack(animTrack, model)
 			end
 			if playerRoot and killerRoot and KINON_ParryEngine.Gate() then
 				local pass = KINON_ParryInRange(killerRoot, playerRoot, vel, KINON_LungeAnimationIds[animationId] == true, optionalAttack ~= nil)
-				if pass and (KINON_ParryEngine.ObjectActionCached(model, animTrack)
-					or KINON_ParryEngine.NearObjectAction(model, playerRoot, not knownAttack)) then
-					pass = false
-				end
-				if pass and KINON_KillerStunned(model) then pass = false end
 				if pass then
 					local wasFirst = firstPass
 					firstPass = false
@@ -6558,7 +6598,7 @@ local function KINON_HandleAttackTrack(animTrack, model)
 				end
 			end
 			RunService.PreSimulation:Wait()
-		until tick() - startTime >= 0.85
+		until tick() - startTime >= 0.45
 	end)
 end
 
@@ -6578,63 +6618,9 @@ local function KINON_HookAnimator(animator, model)
 	end)
 end
 
-local function KINON_EarlyAttack(model, isLunge)
-	if not (Parry.Enabled or ParryV2.Enabled) or not model or not model.Parent then return end
-	if not KINON_ParryEngine.Gate() then return end
-	local killerRoot = model:FindFirstChild("HumanoidRootPart")
-	local playerRoot = getRoot()
-	if not killerRoot or not playerRoot then return end
-	local pass = KINON_ParryInRange(killerRoot, playerRoot, killerRoot.AssemblyLinearVelocity, isLunge == true)
-	if pass and (KINON_ParryEngine.ObjectActionCached(model, nil)
-		or KINON_ParryEngine.NearObjectAction(model, playerRoot)) then pass = false end
-	if pass and KINON_KillerStunned(model) then pass = false end
-	if pass then KINON_TryParry("Early", killerRoot, true) end
-end
-
-local KINON_AggroFired = setmetatable({}, { __mode = "k" })
-local KINON_PollList, KINON_PollAt = {}, 0
-track(RunService.PreSimulation:Connect(function()
-	if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return end
-	local aggro = (Parry.Enabled and Parry.AggressiveMode) or (ParryV2.Enabled and ParryV2.AggressiveMode)
-	local playerRoot = getRoot()
-	if not playerRoot then return end
-	local now = tick()
-	if now - KINON_PollAt > 0.05 then
-		KINON_PollAt = now
-		KINON_PollList = KINON_GetKillerModels()
-	end
-	local reach
-	do
-		local rng = 14
-		if Parry.Enabled then rng = (tonumber(Parry.Range) or 14) + (tonumber(Parry.ReachBonus) or 0)
-		else rng = (tonumber(ParryV2.Range) or 14) + (tonumber(ParryV2.ReachBonus) or 0) end
-		reach = math.clamp(rng, 5, 45)
-	end
-	for _, model in ipairs(KINON_PollList) do
-		local killerRoot = model.Parent and model:FindFirstChild("HumanoidRootPart")
-		if killerRoot and (killerRoot.Position - playerRoot.Position).Magnitude <= reach then
-			local lunging = model:GetAttribute("isLunging") == true
-			if lunging or model:GetAttribute("isAttacking") == true then
-				local last = KINON_AggroFired[model]
-				if not last or now - last > 0 then
-					KINON_AggroFired[model] = now
-					pcall(KINON_EarlyAttack, model, lunging)
-				end
-			else
-				KINON_AggroFired[model] = nil
-			end
-		end
-	end
-end))
-
 local function KINON_HookKillerModel(model)
 	if not model or KINON_ParryEngine.SeenModels[model] then return end
 	KINON_ParryEngine.SeenModels[model] = true
-	track(model.AttributeChanged:Connect(function(attr)
-		if (attr == "isAttacking" or attr == "isLunging") and model:GetAttribute(attr) == true then
-			pcall(KINON_EarlyAttack, model, attr == "isLunging")
-		end
-	end))
 	local function hookChild(child)
 		if child:IsA("Humanoid") then
 			local animator = child:FindFirstChildOfClass("Animator")
@@ -6705,33 +6691,6 @@ task.spawn(function()
 			task.wait(0.04)
 		else
 			task.wait(0.35)
-		end
-	end
-end)
-
-task.spawn(function()
-	local rs = game:GetService("ReplicatedStorage")
-	local remotes = rs:WaitForChild("Remotes", 20)
-	local atks = remotes and remotes:WaitForChild("Attacks", 20)
-	if not atks then return end
-	local function onAttack(isLunge)
-		if unloaded or not (Parry.Enabled or ParryV2.Enabled) then return end
-		local myRoot = getRoot()
-		if not myRoot then return end
-		local best, bestD = nil, 1e9
-		for _, model in ipairs(KINON_GetKillerModels()) do
-			local r = model:FindFirstChild("HumanoidRootPart")
-			if r then
-				local d = (r.Position - myRoot.Position).Magnitude
-				if d < bestD then best, bestD = model, d end
-			end
-		end
-		if best then pcall(KINON_EarlyAttack, best, isLunge) end
-	end
-	for name, lunge in pairs({ BasicAttack = false, Lunge = true }) do
-		local rem = atks:FindFirstChild(name)
-		if rem and rem:IsA("RemoteEvent") then
-			track(rem.OnClientEvent:Connect(function() onAttack(lunge) end))
 		end
 	end
 end)
