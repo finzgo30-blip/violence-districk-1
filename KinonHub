@@ -52,17 +52,6 @@ local ParryV2 = {
 	RangeColor = Color3.fromRGB(100, 200, 255),
 }
 
-local function KINON_ApplyHL(hl, color, fillOn, outlineOn)
-	-- Highlight ESP: isi agak transparan + outline tebal/solid (tidak perlu Outline ESP).
-	-- Outline ESP saja = hanya garis tepi.
-	local showOutline = outlineOn or fillOn
-	hl.FillColor = color
-	hl.FillTransparency = fillOn and 0.65 or 1
-	hl.OutlineColor = color -- outline ikut warna ESP (status untuk player)
-	hl.OutlineTransparency = showOutline and 0 or 1
-	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-end
-
 local State = {
 	Spear     = { Enabled = false, K = 0, Mode = 2 },
 	Parry     = Parry,
@@ -94,7 +83,7 @@ State.PlayerESPObj = (function()
 		ShowPlayer = false, ShowKiller = false,
 		ShowName = false, ShowBox = false, ShowDist = false,
 		ShowStatus = false, ShowItem = false,
-		HLFill = false, HLOutline = true, KillerWarn = false, HookCounter = false,
+		HLFill = true, HLOutline = true, KillerWarn = false, HookCounter = false,
 		Tick = 0.3,
 	}
 	local DEFAULT_COLORS = {
@@ -229,7 +218,7 @@ State.PlayerESPObj = (function()
 		row.LayoutOrder = order; row.Parent = parent
 		local l = Instance.new("UIListLayout", row)
 		l.FillDirection = Enum.FillDirection.Horizontal
-		l.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		l.HorizontalAlignment = Enum.HorizontalAlignment.Left
 		l.VerticalAlignment = Enum.VerticalAlignment.Center
 		l.SortOrder = Enum.SortOrder.LayoutOrder
 		l.Padding = UDim.new(0, pad)
@@ -251,20 +240,20 @@ State.PlayerESPObj = (function()
 		return Color3.fromRGB(255, 60, 60)
 	end
 
-	-- panel kanan: ikon item + role + nama item + jarak
+	-- panel samping kanan (ukuran pixel tetap):
+	-- nama, status/hook, ikon item, role, nama item, jarak
 	function U.Info(ch, tag, o)
 		local bb = ch:FindFirstChild(tag)
-		if bb and not (bb:IsA("BillboardGui") and bb:FindFirstChild("Box") and true) then bb:Destroy(); bb = nil end
+		if bb and not (bb:IsA("BillboardGui") and bb:FindFirstChild("Box") and bb.Box:FindFirstChild("NameT")) then bb:Destroy(); bb = nil end
 		if not bb then
 			bb = Instance.new("BillboardGui")
 			bb.Name = tag; bb.AlwaysOnTop = true
 			bb.LightInfluence = 0; bb.ResetOnSpawn = false
-			bb.StudsOffset = Vector3.new(0, 1.3, 0) -- geser ke samping dalam pixel (Box.Position), bukan studs, supaya bentuknya tetap
 			bb.Parent = ch
 			local box = Instance.new("Frame", bb)
 			box.Name = "Box"; box.BackgroundTransparency = 1
 			box.AnchorPoint = Vector2.new(0, 0.5)
-			box.Position = UDim2.new(0.5, 20, 0.5, 0)
+			box.Position = UDim2.fromScale(0.5, 0.5)
 			box.Size = UDim2.fromScale(0.5, 1)
 			local list = Instance.new("UIListLayout", box)
 			list.FillDirection = Enum.FillDirection.Vertical
@@ -272,115 +261,105 @@ State.PlayerESPObj = (function()
 			list.VerticalAlignment = Enum.VerticalAlignment.Center
 			list.SortOrder = Enum.SortOrder.LayoutOrder
 			list.Padding = UDim.new(0, 1)
+			local function mk(nm, order, rich)
+				local l = Instance.new("TextLabel", box)
+				l.Name = nm; l.LayoutOrder = order
+				l.BackgroundTransparency = 1
+				l.Font = Enum.Font.GothamBold
+				l.TextSize = 12; l.RichText = rich == true
+				l.TextXAlignment = Enum.TextXAlignment.Left
+				l.TextStrokeTransparency = 0.4
+				l.TextStrokeColor3 = Color3.new(0, 0, 0)
+				return l
+			end
+			mk("NameT", 1); mk("StatusT", 2, true)
 			local ib = Instance.new("Frame", box)
-			ib.Name = "IconBox"; ib.LayoutOrder = 1
-			ib.Size = UDim2.fromOffset(24, 24)
+			ib.Name = "IconBox"; ib.LayoutOrder = 3
 			ib.BackgroundColor3 = Color3.fromRGB(20, 14, 30)
 			ib.BackgroundTransparency = 0.25
 			Instance.new("UICorner", ib).CornerRadius = UDim.new(0, 3)
 			local st = Instance.new("UIStroke", ib)
-			st.Name = "Stroke"; st.Thickness = 1
+			st.Name = "Stroke"; st.Thickness = 1.5
 			local img = Instance.new("ImageLabel", ib)
 			img.Name = "Img"; img.BackgroundTransparency = 1
 			img.Size = UDim2.fromScale(1, 1)
-			for i, nm in ipairs({ "Role", "Item", "Dist" }) do
-				local l = Instance.new("TextLabel", box)
-				l.Name = nm; l.LayoutOrder = 1 + i
-				l.BackgroundTransparency = 1
-				l.Size = UDim2.new(1, 0, 0, 14)
-				l.Font = Enum.Font.GothamBold; l.TextSize = 11
-				l.TextXAlignment = Enum.TextXAlignment.Left
-				l.TextStrokeTransparency = 0.4
-				l.TextStrokeColor3 = Color3.new(0, 0, 0)
-				l.TextTruncate = Enum.TextTruncate.AtEnd
-			end
+			mk("Role", 4); mk("Item", 5); mk("Dist", 6)
 		end
 		bb.Adornee = o.adornee
 		local box = bb.Box
-		local h = 0
-		local hasIcon = o.icon and o.icon ~= ""
-		box.IconBox.Visible = hasIcon and true or false
-		if hasIcon then
+		local H = { NameT = 16, StatusT = 14, IconBox = 34, Role = 13, Item = 13, Dist = 13 }
+		local vis = {
+			NameT = o.name ~= nil, StatusT = o.statusRich ~= nil,
+			IconBox = (o.icon ~= nil and o.icon ~= ""),
+			Role = o.role ~= nil, Item = o.item ~= nil, Dist = o.dist ~= nil,
+		}
+		local total = 0
+		for k, h in pairs(H) do
+			local inst = box[k]
+			inst.Visible = vis[k]
+			if vis[k] then total = total + h + 1 end
+			if k == "IconBox" then inst.Size = UDim2.fromOffset(h, h)
+			else inst.Size = UDim2.new(1, 0, 0, h) end
+		end
+		total = math.max(total, 4)
+		if vis.NameT then box.NameT.Text = o.name; box.NameT.TextColor3 = o.nameColor or Color3.new(1, 1, 1) end
+		if vis.StatusT then box.StatusT.Text = o.statusRich end
+		if vis.IconBox then
 			box.IconBox.Img.Image = o.icon
 			box.IconBox.Stroke.Color = o.color or Color3.fromRGB(170, 90, 255)
-			h = h + 25
 		end
-		local function line(nm, text, color)
-			local l = box[nm]
-			l.Visible = text ~= nil
-			if text then l.Text = text; l.TextColor3 = color or Color3.new(1, 1, 1); h = h + 14 end
-		end
-		line("Role", o.role, o.roleColor)
-		line("Item", o.item, Color3.new(1, 1, 1))
-		line("Dist", o.dist and (o.dist .. "m") or nil, Color3.new(1, 1, 1))
-		bb.Size = UDim2.fromOffset(260, math.max(h, 4))
-	end
-
-	-- panel kiri badan: status + hook counter (rata kanan, menempel ke badan)
-	function U.Left(ch, tag, o)
-		local bb = ch:FindFirstChild(tag)
-		if bb and not (bb:IsA("BillboardGui") and bb:FindFirstChild("Box")) then bb:Destroy(); bb = nil end
-		if not bb then
-			bb = Instance.new("BillboardGui")
-			bb.Name = tag; bb.AlwaysOnTop = true
-			bb.LightInfluence = 0; bb.ResetOnSpawn = false
-			bb.StudsOffset = Vector3.new(0, 1.3, 0)
-			bb.Parent = ch
-			local box = Instance.new("Frame", bb)
-			box.Name = "Box"; box.BackgroundTransparency = 1
-			box.AnchorPoint = Vector2.new(1, 0.5)
-			box.Position = UDim2.new(0.5, -20, 0.5, 0)
-			box.Size = UDim2.fromScale(0.5, 1)
-			local list = Instance.new("UIListLayout", box)
-			list.FillDirection = Enum.FillDirection.Vertical
-			list.HorizontalAlignment = Enum.HorizontalAlignment.Right
-			list.VerticalAlignment = Enum.VerticalAlignment.Center
-			list.SortOrder = Enum.SortOrder.LayoutOrder
-			list.Padding = UDim.new(0, 1)
-			for i, nm in ipairs({ "Status", "Hook" }) do
-				local l = Instance.new("TextLabel", box)
-				l.Name = nm; l.LayoutOrder = i
-				l.BackgroundTransparency = 1
-				l.Size = UDim2.new(1, 0, 0, 14)
-				l.Font = Enum.Font.GothamBold; l.TextSize = 11
-				l.TextXAlignment = Enum.TextXAlignment.Right
-				l.TextStrokeTransparency = 0.4
-				l.TextStrokeColor3 = Color3.new(0, 0, 0)
-			end
-		end
-		bb.Adornee = o.adornee
-		local box = bb.Box
-		local h = 0
-		local function line(nm, text, color)
-			local l = box[nm]
-			l.Visible = text ~= nil
-			if text then l.Text = text; l.TextColor3 = color or Color3.new(1, 1, 1); h = h + 15 end
-		end
-		line("Status", o.status, o.statusColor)
-		line("Hook", o.hook ~= nil and ("Hook " .. o.hook) or nil, o.hook ~= nil and HookColor(o.hook) or nil)
-		bb.Size = UDim2.fromOffset(260, math.max(h, 4))
+		if vis.Role then box.Role.Text = o.role; box.Role.TextColor3 = o.roleColor or Color3.new(1, 1, 1) end
+		if vis.Item then box.Item.Text = o.item; box.Item.TextColor3 = Color3.new(1, 1, 1) end
+		if vis.Dist then box.Dist.Text = o.dist .. "m"; box.Dist.TextColor3 = Color3.new(1, 1, 1) end
+		bb.Size = UDim2.fromOffset(260, total)
+		bb.StudsOffset = Vector3.new(1.7, 1.3, 0)
 	end
 
 	function U.Card(ch, tag, o)
 		local bb = ch:FindFirstChild(tag)
-		if bb and not (bb:IsA("BillboardGui") and bb:FindFirstChild("Box") and bb.Box:FindFirstChild("InfoRow")) then
+		if bb and not (bb:IsA("BillboardGui") and bb:FindFirstChild("Box") and bb.Box:FindFirstChild("InfoRow") and bb:FindFirstChild("Pointer") and bb:FindFirstChild("PointerDiag")) then
 			bb:Destroy(); bb = nil
 		end
 		if not bb then
 			bb = Instance.new("BillboardGui")
 			bb.Name = tag; bb.AlwaysOnTop = true
 			bb.LightInfluence = 0; bb.ResetOnSpawn = false
-			bb.Size = UDim2.fromOffset(200, 34)
-			bb.StudsOffset = Vector3.new(0, o.offsetY or 3.6, 0)
+			bb.Size = UDim2.fromOffset(260, 120)
 			bb.Parent = ch
 
 			local box = Instance.new("Frame", bb)
 			box.Name = "Box"; box.BackgroundTransparency = 1
-			box.Size = UDim2.fromScale(1, 1)
+			-- layout k107, tapi diletakkan di samping kanan karakter (ukuran pixel tetap)
+			-- label duduk di atas garis datar; dari ujung kiri garis ada garis miring turun ke titik di kepala
+			box.AnchorPoint = Vector2.new(0, 1)
+			box.Position = UDim2.new(0.5, 24, 0.5, -21)
+			box.Size = UDim2.new(0.5, -24, 0, 30)
+			local ln = Instance.new("Frame", bb)
+			ln.Name = "Pointer"; ln.BorderSizePixel = 0
+			ln.AnchorPoint = Vector2.new(0, 0.5)
+			ln.Position = UDim2.new(0.5, 20, 0.5, -20)
+			ln.Size = UDim2.fromOffset(150, 2)
+			ln.BackgroundColor3 = Color3.new(1, 1, 1)
+			ln.BackgroundTransparency = 0.15
+			local diag = Instance.new("Frame", bb)
+			diag.Name = "PointerDiag"; diag.BorderSizePixel = 0
+			diag.AnchorPoint = Vector2.new(0.5, 0.5)
+			diag.Position = UDim2.new(0.5, 10, 0.5, -10)
+			diag.Size = UDim2.fromOffset(29, 2)
+			diag.Rotation = -45
+			diag.BackgroundColor3 = Color3.new(1, 1, 1)
+			diag.BackgroundTransparency = 0.15
+			local dot = Instance.new("Frame", bb)
+			dot.Name = "PointerDot"; dot.BorderSizePixel = 0
+			dot.AnchorPoint = Vector2.new(0.5, 0.5)
+			dot.Position = UDim2.fromScale(0.5, 0.5)
+			dot.Size = UDim2.fromOffset(6, 6)
+			dot.BackgroundColor3 = Color3.new(1, 1, 1)
+			Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
 			local list = Instance.new("UIListLayout", box)
 			list.FillDirection = Enum.FillDirection.Vertical
-			list.HorizontalAlignment = Enum.HorizontalAlignment.Center
-			list.VerticalAlignment = Enum.VerticalAlignment.Center
+			list.HorizontalAlignment = Enum.HorizontalAlignment.Left
+			list.VerticalAlignment = Enum.VerticalAlignment.Bottom
 			list.SortOrder = Enum.SortOrder.LayoutOrder
 			list.Padding = UDim.new(0, 1)
 
@@ -397,8 +376,8 @@ State.PlayerESPObj = (function()
 			info.TextColor3 = Color3.new(1, 1, 1)
 		end
 
-		bb.Adornee = o.adornee
-		bb.StudsOffset = Vector3.new(-1, o.offsetY or 3.4, 0)
+		bb.Adornee = ch:FindFirstChild("Head") or o.adornee
+		bb.StudsOffset = Vector3.new(0, 0.5, 0)
 		local nameRow, infoRow = bb.Box.NameRow, bb.Box.InfoRow
 
 		local hasName = o.name and o.name ~= ""
@@ -413,13 +392,25 @@ State.PlayerESPObj = (function()
 		local parts = {}
 		if o.status then table.insert(parts, rich(o.status, o.statusColor or Color3.new(1, 1, 1))) end
 		if o.hook ~= nil then table.insert(parts, rich("Hook " .. o.hook, HookColor(o.hook))) end
+		if o.dist then table.insert(parts, rich(o.dist .. "m", Color3.fromRGB(200, 200, 210))) end
 		infoRow.Visible = #parts > 0
 		infoRow.InfoText.Text = table.concat(parts, " " .. rich("|", GREY) .. " ")
 
 		local h = 0
 		if nameRow.Visible then h = h + 16 + 1 end
 		if infoRow.Visible then h = h + 14 end
-		bb.Size = UDim2.fromOffset(200, math.max(h, 4))
+		bb.Size = UDim2.fromOffset(260, 120)
+		bb.Box.Size = UDim2.new(0.5, -24, 0, math.max(h, 4))
+		local c = o.nameColor or Color3.new(1, 1, 1)
+		-- panjang garis datar mengikuti lebar teks
+		local tw = 0
+		if hasName then tw = math.max(tw, nt.TextBounds.X + (hasIcon and 18 or 0)) end
+		if infoRow.Visible then tw = math.max(tw, infoRow.InfoText.TextBounds.X) end
+		if tw <= 0 then tw = 70 end
+		bb.Pointer.Size = UDim2.fromOffset(math.clamp(math.floor(tw + 8), 40, 220), 2)
+		bb.Pointer.BackgroundColor3 = c
+		bb.PointerDiag.BackgroundColor3 = c
+		bb.PointerDot.BackgroundColor3 = c
 	end
 
 	local Class = {}
@@ -478,7 +469,7 @@ State.PlayerESPObj = (function()
 
 	function Class:_cleanup(ch)
 		if not ch then return end
-		for _, n in ipairs({ "PEH", "KEH", "PE_Text", "KE_Text", "PE_Hook", "KillerWarn", "PE_TextB", "PE_TextI", "KE_TextB", "KE_TextI", "PE_TextL", "KE_TextL" }) do
+		for _, n in ipairs({ "PEH", "KEH", "PE_Text", "KE_Text", "PE_Hook", "KillerWarn", "PE_TextB", "PE_TextI", "KE_TextB", "KE_TextI" }) do
 			local o = ch:FindFirstChild(n)
 			if o then o:Destroy() end
 		end
@@ -538,7 +529,7 @@ State.PlayerESPObj = (function()
 				local ch = plr.Character
 				local killer = plr.Team and plr.Team.Name == "Killer"
 
-				local clearNames = killer and { "PEH", "PE_Text", "PE_Hook", "PE_TextB", "PE_TextI", "PE_TextL" } or { "KEH", "KE_Text", "KE_TextB", "KE_TextI", "KE_TextL" }
+				local clearNames = killer and { "PEH", "PE_Text", "PE_Hook", "PE_TextB", "PE_TextI" } or { "KEH", "KE_Text", "KE_TextB", "KE_TextI" }
 				for _, n in ipairs(clearNames) do
 					local o = ch:FindFirstChild(n); if o then o:Destroy() end
 				end
@@ -563,9 +554,12 @@ State.PlayerESPObj = (function()
 						local hl = ch:FindFirstChild(hlName)
 						if not hl then
 							hl = Instance.new("Highlight")
+							hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 							hl.Name = hlName; hl.Parent = ch
 						end
-						KINON_ApplyHL(hl, color, S.HLFill, S.HLOutline)
+						hl.FillColor = color; hl.OutlineColor = color
+						hl.FillTransparency = S.HLFill and 0.55 or 1
+						hl.OutlineTransparency = S.HLOutline and 0 or 1
 					else
 						local hl = ch:FindFirstChild(hlName)
 						if hl then hl:Destroy() end
@@ -581,6 +575,22 @@ State.PlayerESPObj = (function()
 								if sv then pcall(function() sel = sv.Value end) end
 							end
 							if sel and tostring(sel) ~= "" then name = tostring(sel) end
+							-- buang kata dobel berurutan ("Veil Veil" -> "Veil", "A B A B" -> "A B")
+							do
+								local words = {}
+								for w in tostring(name):gmatch("%S+") do words[#words + 1] = w end
+								local n = #words
+								if n >= 2 and n % 2 == 0 then
+									local same = true
+									for i = 1, n / 2 do if words[i] ~= words[i + n / 2] then same = false; break end end
+									if same then words = { table.unpack(words, 1, n / 2) } end
+								end
+								local out = {}
+								for _, w in ipairs(words) do
+									if out[#out] ~= w then out[#out + 1] = w end
+								end
+								name = table.concat(out, " ")
+							end
 						end
 					end
 					if not killer and S.ShowItem then
@@ -597,30 +607,20 @@ State.PlayerESPObj = (function()
 
 					local hooks = (not killer and S.HookCounter) and self:_hookCount(plr) or nil
 
-					if not hrp or not name then
+					-- hapus sisa panel lama (hindari nama dobel)
+					local oldI = ch:FindFirstChild(tag .. "I"); if oldI then oldI:Destroy() end
+					if not icon and itemName then
+						name = name and (name .. " | " .. itemName) or itemName
+					end
+					if not hrp or (not name and not stText and hooks == nil and not icon and not S.ShowDist) then
 						local e = ch:FindFirstChild(tag); if e then e:Destroy() end
 					else
 						U.Card(ch, tag, {
 							adornee = hrp, name = name,
-							nameColor = killer and P.Killer or Color3.new(1, 1, 1),
+							nameColor = killer and P.Killer or Color3.fromRGB(240, 240, 248),
+							status = stText, statusColor = stColor, hook = hooks,
+							dist = S.ShowDist and dist or nil, icon = icon,
 						})
-					end
-					-- panel kanan (ikon item, role, nama item, jarak)
-					if hrp and (S.ShowDist or itemName) then
-						U.Info(ch, tag .. "I", {
-							adornee = hrp, color = color, icon = icon,
-							role = (not killer) and "Survivor" or nil, -- nama killer sudah di atas kepala
-							roleColor = Color3.new(1, 1, 1),
-							item = itemName, dist = S.ShowDist and dist or nil, distNum = dist,
-						})
-					else
-						local e = ch:FindFirstChild(tag .. "I"); if e then e:Destroy() end
-					end
-					-- panel kiri badan (status + hook counter)
-					if hrp and (stText or hooks ~= nil) then
-						U.Left(ch, tag .. "L", { adornee = hrp, status = stText, statusColor = stColor, hook = hooks })
-					else
-						local e = ch:FindFirstChild(tag .. "L"); if e then e:Destroy() end
 					end
 					local oldBar = ch:FindFirstChild(tag .. "B"); if oldBar then oldBar:Destroy() end
 					local oldHook = ch:FindFirstChild("PE_Hook")
@@ -628,7 +628,7 @@ State.PlayerESPObj = (function()
 				else
 					local h = ch:FindFirstChild(hlName); if h then h:Destroy() end
 					local t = ch:FindFirstChild(tag); if t then t:Destroy() end
-					for _, sfx in ipairs({ "I", "B", "L" }) do
+					for _, sfx in ipairs({ "I", "B" }) do
 						local x = ch:FindFirstChild(tag .. sfx); if x then x:Destroy() end
 					end
 					local hk = ch:FindFirstChild("PE_Hook"); if hk then hk:Destroy() end
@@ -683,7 +683,7 @@ State.WorldESPObj = (function()
 		Hook = false, Gate = false, SCP = false, Pumpkin = false,
 		BearTrap = false, BearTrapDistance = false, BearTrapNoText = false,
 		GeneratorName = false,
-		HLFill = false, HLOutline = true,
+		HLFill = true, HLOutline = true,
 		SCPOnlySlow = false,
 		ScanInterval = 40,
 		TickInterval = 1.8,
@@ -902,11 +902,15 @@ State.WorldESPObj = (function()
 				local hl = obj:FindFirstChild(hlName)
 				if not hl then
 					hl = Instance.new("Highlight")
+					hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 					hl.Name = hlName
 					hl.Parent = obj
 				end
 				if adornee then hl.Adornee = obj end
-				KINON_ApplyHL(hl, color, S.HLFill, S.HLOutline)
+				hl.FillColor = color
+				hl.OutlineColor = color
+				hl.FillTransparency = S.HLFill and 0.55 or 1
+				hl.OutlineTransparency = S.HLOutline and 0 or 1
 			end
 		end
 	end
@@ -935,10 +939,14 @@ State.WorldESPObj = (function()
 				local hl = model:FindFirstChild("GEH")
 				if not hl then
 					hl = Instance.new("Highlight")
+					hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 					hl.Name = "GEH"
 					hl.Parent = model
 				end
-				KINON_ApplyHL(hl, col, S.HLFill, S.HLOutline)
+				hl.FillColor = col
+				hl.OutlineColor = col
+				hl.FillTransparency = S.HLFill and 0.55 or 1
+				hl.OutlineTransparency = S.HLOutline and 0 or 1
 
 				if S.GeneratorName then
 					billboard(model, "GE_Text", {
@@ -977,7 +985,7 @@ State.WorldESPObj = (function()
 					ad.Adornee = base
 					ad.Size = base.Size
 					ad.Color3 = P.Window
-					ad.Transparency = S.HLFill and 0.7 or (S.HLOutline and 0.1 or 1)
+					ad.Transparency = S.HLFill and 0.55 or (S.HLOutline and 0.1 or 1)
 				end
 			end
 		end
@@ -1003,10 +1011,14 @@ State.WorldESPObj = (function()
 					local hl = scp:FindFirstChild("SCPEH")
 					if not hl then
 						hl = Instance.new("Highlight")
+						hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 						hl.Name = "SCPEH"
 						hl.Parent = scp
 					end
-					KINON_ApplyHL(hl, P.SCP, S.HLFill, S.HLOutline)
+					hl.FillColor = P.SCP
+					hl.OutlineColor = P.SCP
+					hl.FillTransparency = S.HLFill and 0.55 or 1
+					hl.OutlineTransparency = S.HLOutline and 0 or 1
 				else
 					local e = scp:FindFirstChild("SCPEH")
 					if e then e:Destroy() end
@@ -1026,11 +1038,15 @@ State.WorldESPObj = (function()
 				local hl = pumpkin:FindFirstChild("PumpkinEH")
 				if not hl then
 					hl = Instance.new("Highlight")
+					hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 					hl.Name = "PumpkinEH"
 					hl.Adornee = pumpkin
 					hl.Parent = pumpkin
 				end
-				KINON_ApplyHL(hl, color, self.Settings.HLFill, self.Settings.HLOutline)
+				hl.FillColor = color
+				hl.OutlineColor = color
+				hl.FillTransparency = self.Settings.HLFill and 0.55 or 1
+				hl.OutlineTransparency = self.Settings.HLOutline and 0 or 1
 				local oldText = pumpkin:FindFirstChild("Pumpkin_Text")
 				if oldText then oldText:Destroy() end
 			end
@@ -1051,10 +1067,14 @@ State.WorldESPObj = (function()
 				if S.HLFill or S.HLOutline then
 					if not hl then
 						hl = Instance.new("Highlight")
+						hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 						hl.Name = "BearTrapEH"
 						hl.Parent = obj
 					end
-					KINON_ApplyHL(hl, P.BearTrap, S.HLFill, S.HLOutline)
+					hl.FillColor = P.BearTrap
+					hl.OutlineColor = P.BearTrap
+					hl.FillTransparency = S.HLFill and 0.55 or 1
+					hl.OutlineTransparency = S.HLOutline and 0 or 1
 				elseif hl then
 					hl:Destroy()
 				end
@@ -7207,6 +7227,7 @@ local Main = make("Frame", {
 corner(Main, 14)
 stroke(Main, Color3.fromRGB(120, 120, 120), 1, 0.25)
 
+
 local UIScale = make("UIScale", { Scale = 1 }, Main)
 local userScale = 1
 local function updateScale()
@@ -7449,6 +7470,22 @@ local Content = make("Frame", {
     Size = UDim2.new(1, -(SIDEBAR_W + 24), 1, -(HEADER_H + Footer_H + 22)),
     BackgroundTransparency = 1,
 }, Main)
+
+-- gambar latar belakang di belakang panel fitur (pas dengan area Content)
+do
+    local bg = make("ImageLabel", {
+        Name = "BgImage",
+        Position = Content.Position,
+        Size = Content.Size,
+        BackgroundTransparency = 1,
+        Image = "rbxassetid://106045290396546",
+        ScaleType = Enum.ScaleType.Crop,
+        ImageTransparency = 0.1,
+        ZIndex = 0,
+        Active = false,
+    }, Main)
+    corner(bg, 10)
+end
 
 local PageTitle = make("TextLabel", {
     Size = UDim2.new(1, -110, 0, 18),
@@ -11821,7 +11858,7 @@ end)()
 	local function opt(label, icn, field, colorKey)
 		addCheckbox(card, label, icn,
 			function() return s[field] end,
-			function(v) s[field] = v; fire("ESPPlayer") end,
+			function(v) s[field] = v; if field == "HLFill" then s.HLOutline = v end; fire("ESPPlayer") end,
 			colorKey and function() return esp.Palette[colorKey] end or nil,
 			colorKey and function(c) esp:SetColor(colorKey, c) end or nil)
 	end
@@ -11832,7 +11869,6 @@ end)()
 	opt("Show Status",    "heart-pulse",    "ShowStatus")
 	opt("Show Item",      "package",        "ShowItem")
 	opt("Highlight ESP",  "sparkles",       "HLFill")
-	opt("Outline ESP",    "scan",           "HLOutline")
 	opt("Hook Counter",   "link",           "HookCounter")
 	opt("Killer Warning", "triangle-alert", "KillerWarn")
 	addCheckbox(card, "Stun Indicator", "zap",
@@ -11879,7 +11915,7 @@ do
 	local function opt(label, icn, field, colorKey)
 		addCheckbox(card, label, icn,
 			function() return s[field] end,
-			function(v) s[field] = v; fire("ESPWorld") end,
+			function(v) s[field] = v; if field == "HLFill" then s.HLOutline = v end; fire("ESPWorld") end,
 			colorKey and function() return esp.Palette[colorKey] end or nil,
 			colorKey and function(c) esp:SetColor(colorKey, c) end or nil)
 	end
@@ -11895,7 +11931,6 @@ do
 	opt("Bear Trap",       "bomb",       "BearTrap", "BearTrap")
 	opt("Hide Trap Text",  "eye-off",    "BearTrapNoText")
 	opt("Highlight ESP",   "sparkles",   "HLFill")
-	opt("Outline ESP",     "scan",       "HLOutline")
 end
 
 State.Utilities = {
@@ -12037,17 +12072,14 @@ do
 end
 
 do
-	-- Hook bersama untuk Always Fast Vault, Safety Fast Vault, dan Unlimited Vault.
-	-- Satu hook di SurvivorVault.evaluate / SurvivorAnimationsController._validateFastVault
-	-- yang membaca flag V, jadi ketiga fitur tidak saling menimpa.
+
 	local CollectionService = game:GetService("CollectionService")
 	local V = { Fast = false, Safety = false, Unlimited = false }
 
-	-- Safety Fast Vault: fast vault hanya dipaksa kalau pemain cukup jauh dari window dan lari ke arahnya.
-	local MIN_DISTANCE = 1 -- studs dari tepi window (kurang dari ini = menempel -> vault normal)
-	local MIN_RUN_SPEED = 6  -- studs/detik
-	local MIN_FACING = 0.35  -- 1 = lurus ke window, 0 = menyamping; nilai kecil mengizinkan lari dari samping
-	local WINDOW_RANGE = 14  -- hanya window dalam jarak ini yang dipertimbangkan
+	local MIN_DISTANCE = 1
+	local MIN_RUN_SPEED = 6
+	local MIN_FACING = 0.35
+	local WINDOW_RANGE = 14
 
 	local BLOCK_WORDS = { "block", "limit", "max", "cooldown", "occup", "exhaust", "used", "disabled" }
 
@@ -12081,10 +12113,9 @@ do
 		return nil
 	end
 
-	-- Window dari argumen evaluate (kalau game mengirimnya), kalau tidak ada: window terdekat.
 	local function windowFromArgs(self, ...)
 		local found
-		local args = table.pack(...) -- "..." tidak boleh dipakai langsung di dalam fungsi anonim
+		local args = table.pack(...)
 		pcall(function()
 			for i = 1, args.n do
 				found = asWindow(args[i])
@@ -12115,7 +12146,6 @@ do
 		return best
 	end
 
-	-- Jarak horizontal dari pemain ke tepi terdekat window + arah ke titik itu.
 	local function windowGap(win, pos)
 		local ok, cf, size = pcall(win.GetBoundingBox, win)
 		if not ok or not cf then return nil end
@@ -12130,7 +12160,6 @@ do
 		return gap, dir.Unit
 	end
 
-	-- true = boleh paksa fast vault sekarang.
 	local function safetyPasses(self, ...)
 		local char = LP.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -12139,9 +12168,9 @@ do
 		local flat = Vector3.new(vel.X, 0, vel.Z)
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		local moveDir = hum and Vector3.new(hum.MoveDirection.X, 0, hum.MoveDirection.Z) or Vector3.zero
-		-- sedang belok: kecepatan sempat turun, tapi tombol gerak masih ditekan -> tetap dianggap lari
+
 		local minSpeed = moveDir.Magnitude > 0.1 and MIN_RUN_SPEED * 0.6 or MIN_RUN_SPEED
-		if flat.Magnitude < minSpeed then return false end -- diam / jalan pelan -> vault normal
+		if flat.Magnitude < minSpeed then return false end
 
 		local win = windowFromArgs(self, ...)
 		if win then
@@ -12149,14 +12178,13 @@ do
 			if not ok or (pivot.Position - root.Position).Magnitude > WINDOW_RANGE * 2 then win = nil end
 		end
 		win = win or nearestWindow(root.Position)
-		if not win then return true end -- window tidak terdeteksi: jarak tak bisa diukur, cukup syarat lari
+		if not win then return true end
 
 		local gap, dir = windowGap(win, root.Position)
 		if not gap then return true end
-		if gap < MIN_DISTANCE then return false end -- menempel di window -> vault normal
+		if gap < MIN_DISTANCE then return false end
 		if not dir then return false end
-		-- lari dari samping lalu belok lurus ke window juga lolos: cukup salah satu arah
-		-- (kecepatan, arah tombol gerak, atau hadap karakter) mengarah ke window
+
 		if flat.Unit:Dot(dir) >= MIN_FACING then return true end
 		if moveDir.Magnitude > 0.1 and moveDir.Unit:Dot(dir) >= MIN_FACING then return true end
 		local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
@@ -12242,7 +12270,6 @@ do
 		V.Safety = state and true or false
 	end
 
-	-- ===== Unlimited Vault: lepas tag "Blocked" (versi asli) =====
 	local UnlimitedVaultEnabled = false
 	local UnlimitedVaultConn = nil
 
@@ -12273,7 +12300,6 @@ do
 		if state then EnableUnlimitedVault() else DisableUnlimitedVault() end
 	end
 
-	-- diekspos untuk pengujian/penyesuaian
 	State.VaultHook = { V = V, safetyPasses = safetyPasses, isBlockedReason = isBlockedReason, InstallHooks = InstallHooks }
 end
 
