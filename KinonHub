@@ -32,7 +32,7 @@ local Parry = {
 	ReachBonus = 2,
 	FaceSensitivity = 6,
 	AggressiveMode = true,
-	SafetyParry = true,
+	SafetyParry = false,
 	
 	Distance = 15,
 	FaceBias = 10,
@@ -46,7 +46,7 @@ local ParryV2 = {
 	ReachBonus = 2,
 	FaceSensitivity = 6,
 	AggressiveMode = true,
-	SafetyParry = true,
+	SafetyParry = false,
 	
 	CircleVisible = false,
 	RangeColor = Color3.fromRGB(100, 200, 255),
@@ -5453,6 +5453,10 @@ local function KINON_ShouldPassFaceCheck(killerRoot, playerRoot)
 	if offset.Magnitude < 0.05 or look.Magnitude < 0.05 then return true end
 	local sensitivity = math.clamp(tonumber(Parry.FaceSensitivity) or 10, 0, 10) / 10
 	local maxAngle = 20 + sensitivity * 100
+	-- killer dekat sedang memutar badan saat mengayun: sudut dilonggarkan supaya tidak telat
+	local dist = offset.Magnitude
+	if dist <= 2.5 then return true end
+	if dist <= 7 then maxAngle = math.min(maxAngle + 45, 160) end
 	return look.Unit:Dot(offset.Unit) >= math.cos(math.rad(maxAngle))
 end
 
@@ -5471,6 +5475,10 @@ local function KINON_ShouldPassFaceCheckV2(killerRoot, playerRoot)
 	if offset.Magnitude < 0.05 or look.Magnitude < 0.05 then return true end
 	local sensitivity = math.clamp(tonumber(ParryV2.FaceSensitivity) or 10, 0, 10) / 10
 	local maxAngle = 20 + sensitivity * 100
+	-- killer dekat sedang memutar badan saat mengayun: sudut dilonggarkan supaya tidak telat
+	local dist = offset.Magnitude
+	if dist <= 2.5 then return true end
+	if dist <= 7 then maxAngle = math.min(maxAngle + 45, 160) end
 	return look.Unit:Dot(offset.Unit) >= math.cos(math.rad(maxAngle))
 end
 
@@ -6271,15 +6279,52 @@ local function KINON_ActionBusy(character)
 end
 
 
-local KINON_SafetyAttrs = { "isVaulting", "isRepairing", "isUnhooking", "isHealing", "isSliding" }
+local KINON_SafetyAttrs = { "isVaulting", "isSliding", "isRepairing", "isUnhooking", "isHealing" }
+-- atribut vault/slide sering telat mati: hanya memblokir sebentar sejak mulai menyala
+local KINON_SafetyCap = { isVaulting = 0.3, isSliding = 0.3, isRepairing = 6, isUnhooking = 6, isHealing = 6 }
+-- aksi di tempat (repair/unhook/heal) hanya dianggap nyata kalau kamu memang diam; vault/slide kalau memang bergerak
+local KINON_SafetyStill = { isRepairing = true, isUnhooking = true, isHealing = true }
+local KINON_SafetySince = {}
+local KINON_SafetyBound = setmetatable({}, { __mode = "k" })
+local function KINON_BindSafety(ci)
+	if KINON_SafetyBound[ci] then return end
+	KINON_SafetyBound[ci] = true
+	for _, attr in ipairs(KINON_SafetyAttrs) do
+		local function upd(initial)
+			if ci:GetAttribute(attr) == true then
+				-- sudah menyala sebelum dipantau = dianggap lama/macet, bukan aksi yang baru mulai
+				KINON_SafetySince[attr] = KINON_SafetySince[attr] or (initial and -1e9 or os.clock())
+			else
+				KINON_SafetySince[attr] = nil
+			end
+		end
+		upd(true)
+		track(ci:GetAttributeChangedSignal(attr):Connect(function() upd(false) end))
+	end
+end
 local function KINON_IsSafeToParry(char)
 	local on = (Parry.Enabled and Parry.SafetyParry ~= false) or (ParryV2.Enabled and ParryV2.SafetyParry ~= false)
 	if not on then return true end
 	if not char then return false end
 	local ci = char:FindFirstChild("CheckInterractable")
 	if not ci then return true end
+	KINON_BindSafety(ci)
+	local now = os.clock()
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local v = root and root.AssemblyLinearVelocity or Vector3.zero
+	local speed = Vector3.new(v.X, 0, v.Z).Magnitude
 	for _, attr in ipairs(KINON_SafetyAttrs) do
-		if ci:GetAttribute(attr) == true then return false end
+		if ci:GetAttribute(attr) == true then
+			local since = KINON_SafetySince[attr] or -1e9
+			local cap = KINON_SafetyCap[attr] or 1
+			if now - since < cap then
+				if KINON_SafetyStill[attr] then
+					if speed < 3 then return false end
+				elseif speed >= 4 then
+					return false
+				end
+			end
+		end
 	end
 	return true
 end
@@ -7751,6 +7796,33 @@ end
 local controls = {}
 
 local KinonActiveSlider = nil
+-- penjaga scroll: kalau jari/mouse sudah dilepas tapi slider belum sempat release (event hilang),
+-- paksa lepas supaya panel bisa di-scroll lagi
+track(RunService.Heartbeat:Connect(function()
+    local tok = KinonActiveSlider
+    if tok then
+        local okS, dragging, dragInput, pending, pendingInput = pcall(tok.getState)
+        if okS then
+            local live = dragging and dragInput or (pending and pendingInput) or nil
+            local ended = live == nil
+            if live then
+                local st = live.UserInputState
+                ended = st == Enum.UserInputState.End or st == Enum.UserInputState.Cancel
+                if not ended and live.UserInputType == Enum.UserInputType.MouseButton1 then
+                    ended = not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                end
+            end
+            if ended then pcall(tok.release) end
+        else
+            KinonActiveSlider = nil
+        end
+    end
+    if not KinonActiveSlider then
+        if not LeftColumn.ScrollingEnabled then LeftColumn.ScrollingEnabled = true end
+        if not RightColumn.ScrollingEnabled then RightColumn.ScrollingEnabled = true end
+        if not SideList.ScrollingEnabled then SideList.ScrollingEnabled = true end
+    end
+end))
 local function createCard(title, iconName, category, order)
     local frame = make("Frame", {
         Name = (title:gsub("%s+", "")) .. "Card",
@@ -8218,7 +8290,7 @@ local function createCard(title, iconName, category, order)
             if lock then
                 local node = hit.Parent
                 while node do
-                    if node:IsA("ScrollingFrame") then
+                    if node:IsA("ScrollingFrame") and node.ScrollingEnabled then
                         table.insert(lockedScroll, node)
                         node.ScrollingEnabled = false
                     end
@@ -8263,6 +8335,8 @@ local function createCard(title, iconName, category, order)
             pendingInput = nil
             setScrollLock(false)
         end
+        ownerToken.release = release
+        ownerToken.getState = function() return dragging, dragInput, pending, pendingInput end
         track(hit.InputBegan:Connect(function(input)
             if KinonActiveSlider then return end
             if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -10348,6 +10422,14 @@ do
 		function(v) return v end,
 		function() return s.Mode end,
 		function(v) obj:SetMode(v); sync() end)
+	addCheckbox(card, "Auto Skill Check Generator", "target",
+		function() return s.Enabled == true end,
+		function(v)
+			if (s.Enabled == true) == v then return end
+			s.Enabled = v
+			fire("SkillCheck")
+			pcall(card.refresh)
+		end)
 	local T = State.SkillCheckTrap
 	addCheckbox(card, "Auto Trap Skill Check", "target",
 		function() return T.On end,
@@ -11622,6 +11704,126 @@ State.HitAreaObj = (function()
 		releaseAll()
 	end
 
+	return obj
+end)()
+
+
+State.InfoTextObj = (function()
+	local CoreGui = game:GetService("CoreGui")
+	local obj = { Map = false, Killer = false }
+	local gui, infoLabel, loop
+
+	local function guiParent()
+		local okHui, hui = pcall(function() return gethui and gethui() end)
+		if okHui and typeof(hui) == "Instance" then return hui end
+		local okCore = pcall(function()
+			local t = Instance.new("Folder"); t.Parent = CoreGui; t:Destroy()
+		end)
+		if okCore then return CoreGui end
+		return LP:WaitForChild("PlayerGui")
+	end
+
+	local function mk()
+		local l = Instance.new("TextLabel")
+		l.AnchorPoint = Vector2.new(0.5, 0)
+		l.Position = UDim2.new(0.5, 0, 0, 78)
+		l.Size = UDim2.new(0, 0, 0, 18)
+		l.AutomaticSize = Enum.AutomaticSize.X
+		l.BackgroundTransparency = 1
+		l.Active = false
+		l.TextColor3 = Color3.fromRGB(255, 255, 255)
+		l.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		l.TextStrokeTransparency = 0.6
+		l.Font = Enum.Font.GothamBold
+		l.TextSize = 12
+		l.Parent = gui
+		return l
+	end
+
+	local function detectMapName(map)
+		if map:FindFirstChild("random shakes") or map:FindFirstChild("SCP-173 Room") or map:FindFirstChild("SCP-205 Room") then
+			return "Site 68"
+		elseif map:FindFirstChild("HooksMeat") then
+			return "BLOODBATH! Club"
+		elseif map:FindFirstChild("Gate") and map.Gate:FindFirstChild("vfx") then
+			return "Firelink Shrine"
+		elseif map:FindFirstChild("Bldg_Addon_RooftopUnit_A") or map:FindFirstChild("Rooftop") then
+			return "Mercy Hospital Rooftop"
+		elseif map:FindFirstChild("White Armored Car") then
+			return "Mount Massive Asylum"
+		elseif map:FindFirstChild("Dumbster") then
+			return "The Bay Harbor"
+		elseif map:FindFirstChild("water pump") then
+			return "Valdelobos Village"
+		elseif map:FindFirstChild("LargeBoulder01") then
+			return "Woodview Cabin"
+		end
+		return nil
+	end
+
+	local function nextKillerText()
+		local list = Players:GetPlayers()
+		table.sort(list, function(a, b)
+			local aA = a:GetAttribute("AllowKiller") or false
+			local bB = b:GetAttribute("AllowKiller") or false
+			if aA ~= bB then return aA == true end
+			return (a:GetAttribute("KillerChance") or 0) > (b:GetAttribute("KillerChance") or 0)
+		end)
+		local nk = list[1]
+		if not nk then return "None" end
+		local name = State.StreamerMode.Enabled and "Kinon" or nk.Name
+		local sel = nk:GetAttribute("SelectedKiller")
+		if sel and tostring(sel) ~= "" and tostring(sel) ~= nk.Name then
+			name = name .. " [" .. tostring(sel) .. "]"
+		end
+		return name
+	end
+
+	local function refresh()
+		if not gui then return end
+		local parts = {}
+		if obj.Map then
+			local map = workspace:FindFirstChild("Map")
+			local text = "Lobby"
+			if map then text = detectMapName(map) or "Unknown" end
+			parts[#parts + 1] = "Next Map : " .. text
+		end
+		if obj.Killer then
+			parts[#parts + 1] = "Next Killer : " .. nextKillerText()
+		end
+		infoLabel.Text = table.concat(parts, "  |  ")
+	end
+
+	local function sync()
+		local want = obj.Map or obj.Killer
+		if want and not gui then
+			gui = Instance.new("ScreenGui")
+			gui.Name = "KinonInfoText"
+			gui.ResetOnSpawn = false
+			gui.IgnoreGuiInset = true
+			gui.DisplayOrder = 50
+			gui.Parent = guiParent()
+			infoLabel = mk()
+			loop = task.spawn(function()
+				while gui and not unloaded do
+					pcall(refresh)
+					task.wait(0.7)
+				end
+			end)
+		elseif not want and gui then
+			if loop then pcall(task.cancel, loop); loop = nil end
+			pcall(function() gui:Destroy() end)
+			gui, infoLabel = nil, nil
+		end
+		if gui then pcall(refresh) end
+	end
+
+	function obj.SetMap(v) obj.Map = v == true; sync() end
+	function obj.SetKiller(v) obj.Killer = v == true; sync() end
+	function obj.Destroy()
+		obj.Map, obj.Killer = false, false
+		sync()
+	end
 	return obj
 end)()
 
@@ -14371,6 +14573,12 @@ do
 	addCheckbox(card, "Skip Loading & End Screen", "fast-forward",
 		function() return State.SkipObj.LoadOn end,
 		function(v) State.SkipObj:Set("Load", v) end)
+	addCheckbox(card, "Next Map", "map",
+		function() return State.InfoTextObj.Map end,
+		function(v) State.InfoTextObj.SetMap(v) end)
+	addCheckbox(card, "Next Killer", "skull",
+		function() return State.InfoTextObj.Killer end,
+		function(v) State.InfoTextObj.SetKiller(v) end)
 	addCheckbox(card, "Weather & Sky Theme", "cloud-sun",
 		function() return State.WeatherSky.Enabled end,
 		function(v) State.WeatherObj:SetEnabled(v) end)
@@ -14667,6 +14875,7 @@ local function unload()
 	pcall(function() State.SilentObj:Destroy() end)
 	pcall(function() State.DestroyMarks() end)
 	pcall(function() State.SpectatorCounter.Stop() end)
+	pcall(function() State.InfoTextObj.Destroy() end)
 	pcall(function() State.HitAreaObj:Destroy() end)
 	pcall(function() State.FlashObj:Destroy() end)
 	pcall(function() State.NoSlow.K = false; State.NoSlow.S = false end)
