@@ -5502,6 +5502,7 @@ local function CreateCustomParryGUI()
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "KINON_AutoParryShortcut"
 	screenGui.ResetOnSpawn = false
+	screenGui.DisplayOrder = 1000
 	screenGui.IgnoreGuiInset = true
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.Parent = parent
@@ -5685,6 +5686,7 @@ local function CreateCustomParryGUIV2()
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "KINON_AutoParryV2Shortcut"
 	screenGui.ResetOnSpawn = false
+	screenGui.DisplayOrder = 1000
 	screenGui.IgnoreGuiInset = true
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.Parent = parent
@@ -6075,7 +6077,7 @@ local function KINON_FindParryClient(noScan)
 		end)
 	end
 
-	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 6 and KINON_GetParryTool() then
+	if not noScan and typeof(getgc) == "function" and tick() - (KINON_ParryEngine.LastGcScan or 0) > 3 then
 		KINON_ParryEngine.LastGcScan = tick()
 		local ok, objects = pcall(function() return getgc(true) end)
 		if ok and type(objects) == "table" then
@@ -6103,73 +6105,104 @@ task.spawn(function()
 	end
 end)
 
-local function KINON_TryFallbackParry()
-	local fired = false
-	pcall(function()
-		local playerGui = LP:FindFirstChildOfClass("PlayerGui")
-		local survivorGui = playerGui and (playerGui:FindFirstChild("Survivor-mob") or playerGui:FindFirstChild("Survivor"))
-		local controls = survivorGui and survivorGui:FindFirstChild("Controls")
-		local actionButton = controls and (controls:FindFirstChild("Gui-mob") or controls:FindFirstChild("action"))
-		if actionButton then
-			local E = KINON_ParryEngine
-			-- masih ada tekanan yang berjalan: jangan numpuk Down baru
-			if tick() - (E.PressAt or 0) < 0.12 then return end
-			E.PressAt = tick()
-			local function sendUp()
-				if typeof(firesignal) == "function" then
-					pcall(function() firesignal(actionButton.MouseButton1Up) end)
-				end
-				if typeof(getconnections) == "function" then
-					local okUp, upLinks = pcall(function() return getconnections(actionButton.MouseButton1Up) end)
-					if okUp and type(upLinks) == "table" then
-						for _, link in ipairs(upLinks) do pcall(function() link:Fire() end) end
-					end
-				end
+local KINON_ParryButtonNames = { "Gui-mob", "action", "Parry", "parry", "Dagger", "dagger" }
+local function KINON_FindParryButton()
+	local playerGui = LP:FindFirstChildOfClass("PlayerGui")
+	if not playerGui then return nil end
+	for _, guiName in ipairs({ "Survivor-mob", "Survivor" }) do
+		local gui = playerGui:FindFirstChild(guiName)
+		local controls = gui and gui:FindFirstChild("Controls")
+		if controls then
+			for _, n in ipairs(KINON_ParryButtonNames) do
+				local b = controls:FindFirstChild(n)
+				if b and b:IsA("GuiObject") then return b end
 			end
-			if typeof(firesignal) == "function" then
-				pcall(function() firesignal(actionButton.MouseButton1Down) end)
-				fired = true
-			end
-			if typeof(getconnections) == "function" then
-				local okDown, downLinks = pcall(function() return getconnections(actionButton.MouseButton1Down) end)
-				if okDown and type(downLinks) == "table" then
-					for _, link in ipairs(downLinks) do pcall(function() link:Fire(); fired = true end) end
-				end
-			end
-			-- Up dikirim setelah game sempat memproses Down, lalu sekali lagi sebagai jaminan
-			task.delay(0.05, sendUp)
-			task.delay(0.25, sendUp)
 		end
-	end)
+	end
+	return nil
+end
 
-	local tool = KINON_GetParryTool()
-	if typeof(tool) == "Instance" and tool:IsA("Tool") then
-		pcall(function() tool:Activate(); fired = true end)
+-- satu tekanan bersih: SATU Down, lalu Up pasti dikirim (tidak numpuk, tidak ketahan)
+local function KINON_PressButton(btn)
+	local E = KINON_ParryEngine
+	if E.PressActive and tick() - (E.PressAt or 0) < 0.5 then return false end
+	if tick() - (E.PressAt or 0) < 0.03 then return false end
+	E.PressAt = tick()
+	E.PressActive = true
+
+	local downDone, usedTouch = false, false
+	local touchId, tx, ty = 9100 + math.random(1, 800), 0, 0
+
+	-- 1) firesignal (executor umum, HP & PC)
+	if typeof(firesignal) == "function" then
+		downDone = pcall(function() firesignal(btn.MouseButton1Down) end)
+	end
+	-- 2) getconnections: hanya kalau firesignal tidak ada/gagal (jangan Down dua kali)
+	if not downDone and typeof(getconnections) == "function" then
+		local ok, links = pcall(function() return getconnections(btn.MouseButton1Down) end)
+		if ok and type(links) == "table" then
+			for _, link in ipairs(links) do
+				if pcall(function() link:Fire() end) then downDone = true end
+			end
+		end
+	end
+	-- 3) sentuhan virtual: executor HP yang tidak punya firesignal/getconnections
+	if not downDone then
+		local ok = pcall(function()
+			local vim = game:GetService("VirtualInputManager")
+			local ap, as = btn.AbsolutePosition, btn.AbsoluteSize
+			local ix, iy = 0, 0
+			local sg = btn:FindFirstAncestorWhichIsA("ScreenGui")
+			if not (sg and sg.IgnoreGuiInset) then
+				local inset = game:GetService("GuiService"):GetGuiInset()
+				ix, iy = inset.X, inset.Y
+			end
+			tx, ty = ap.X + as.X * 0.5 + ix, ap.Y + as.Y * 0.5 + iy
+			vim:SendTouchEvent(touchId, 0, tx, ty)
+		end)
+		if ok then downDone, usedTouch = true, true end
 	end
 
-	pcall(function()
-		local character = LP.Character
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
-			local toolObj = typeof(tool) == "Instance" and tool or nil
-			local animId = toolObj and toolObj:GetAttribute("useanim") or "109133187196613"
-			local numericId = tostring(animId):match("%d+")
-			if numericId and numericId ~= "" then
-				local animation = Instance.new("Animation")
-				animation.AnimationId = "rbxassetid://" .. numericId
-				local animTrack = animator:LoadAnimation(animation)
-				animTrack.Priority = Enum.AnimationPriority.Action
-				animTrack:Play()
-				fired = true
-				task.delay(1.5, function()
-					pcall(function() animTrack:Stop() end)
-					pcall(function() animTrack:Destroy() end)
-					pcall(function() animation:Destroy() end)
-				end)
+	local released = false
+	local function release()
+		if released then return end
+		released = true
+		if usedTouch then
+			pcall(function() game:GetService("VirtualInputManager"):SendTouchEvent(touchId, 2, tx, ty) end)
+		else
+			if typeof(firesignal) == "function" then
+				pcall(function() firesignal(btn.MouseButton1Up) end)
+			end
+			if typeof(getconnections) == "function" and not (typeof(firesignal) == "function") then
+				local ok, links = pcall(function() return getconnections(btn.MouseButton1Up) end)
+				if ok and type(links) == "table" then
+					for _, link in ipairs(links) do pcall(function() link:Fire() end) end
+				end
 			end
 		end
-	end)
+		E.PressActive = false
+	end
+	task.defer(release)
+	-- jaring pengaman: kalau delay di atas tidak jalan, tetap dilepas
+	task.delay(0.3, function() if not released then release() end E.PressActive = false end)
+	return downDone
+end
+
+local function KINON_TryFallbackParry()
+	local fired = false
+	if tick() < (KINON_ParryEngine.CDUntil or 0) then return false end
+	local btn = KINON_FindParryButton()
+	if btn then
+		local ok, res = pcall(KINON_PressButton, btn)
+		if ok and res then fired = true end
+	end
+	-- tombol tidak ada / tidak bisa ditekan: pakai tool langsung (satu kali saja, tidak dobel dengan tombol)
+	if not fired then
+		local tool = KINON_GetParryTool()
+		if typeof(tool) == "Instance" and tool:IsA("Tool") then
+			if pcall(function() tool:Activate() end) then fired = true end
+		end
+	end
 	return fired
 end
 
@@ -6423,7 +6456,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 		return false
 	end
 
-	local client = KINON_FindParryClient(true)
+	local client = KINON_FindParryClient(true) or KINON_FindParryClient()
 	if client and client.isParryOnCooldown then
 		local now = tick()
 		local E0 = KINON_ParryEngine
@@ -6451,6 +6484,9 @@ local function KINON_TryParry(reason, killerRoot, fast)
 		if okUse and canUse == false then return KINON_ParryDeny("dagger belum siap (CanUse=false)") end
 	end
 
+	if not client and typeof(parryTool) == "Instance" and parryTool:IsA("Tool") and parryTool.Enabled == false then
+		return KINON_ParryDeny("dagger cooldown (tool nonaktif)")
+	end
 	if tick() - (KINON_ParryEngine.LastSuccess or 0) < (pointBlank and 0.03 or 0.1) then return false end
 
 	KINON_ParryEngine.LastAttempt = tick()
@@ -6473,7 +6509,7 @@ local function KINON_TryParry(reason, killerRoot, fast)
 	local fallbackOk, fallbackFired = pcall(KINON_TryFallbackParry)
 	if fallbackOk and fallbackFired then
 		KINON_ParryEngine.LastSuccess = tick()
-		KINON_ParryEngine.CDUntil = tick() + KINON_ParryEngine.GetCD(nil)
+		KINON_ParryEngine.CDUntil = tick() + math.max(KINON_ParryEngine.GetCD(nil), 1.0)
 		return true
 	end
 	return false
@@ -6658,7 +6694,6 @@ do
 		if now - (E.LastSuccess or 0) < 0.03 then return false end
 		local client = KINON_FindParryClient(true)
 		if client and (client.isParryOnCooldown or client.isParryResolving) then
-			if now - (E.GateAt or 0) > 0.05 then E.GateAt = now; return true end
 			return false
 		end
 		return true
@@ -6769,8 +6804,118 @@ local function KINON_ParryInRange(killerRoot, playerRoot, vel, isLunge, isOption
 	return d <= (tonumber(ParryV2.Range) or 14) + (tonumber(ParryV2.ReachBonus) or 0)
 end
 
+-- ===== AUTO PARRY V2 (alur dari kinon_v61; tanpa pengunci karakter; range & face check sama dengan V1) =====
+do
+	local E = KINON_ParryEngine
+
+	function E.V2TryParry(reason, killerRoot)
+		if unloaded or not ParryV2.Enabled then return false end
+		if tick() - (E.LastAttempt or 0) < 0.012 then return false end
+		if not KINON_GetParryTool() then return false end
+		if killerRoot and E.IsImmobile(killerRoot.Parent) then return false end
+
+		local character = LP.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not character or not humanoid or humanoid.Health <= 0 then return false end
+		if character:GetAttribute("Knocked") == true or LP:GetAttribute("Knocked") == true
+			or character:GetAttribute("IsHooked") == true or LP:GetAttribute("IsHooked") == true
+			or character:GetAttribute("IsCarried") == true or LP:GetAttribute("IsCarried") == true
+			or character:GetAttribute("IsDead") == true or LP:GetAttribute("IsDead") == true then
+			return false
+		end
+		if not KINON_IsSafeToParry(character) then return false end
+
+		local client = KINON_FindParryClient()
+		if client and (client.isParryOnCooldown or client.isParryResolving) then return false end
+		if tick() < (E.CDUntil or 0) then return false end
+		do
+			local pt = KINON_GetParryTool()
+			if not client and typeof(pt) == "Instance" and pt:IsA("Tool") and pt.Enabled == false then return false end
+		end
+		if tick() - (E.LastSuccess or 0) < 0.10 then return false end
+
+		E.LastAttempt = tick()
+		if client then
+			local ok, result = pcall(function()
+				if client.character ~= character and type(client._bindCharacter) == "function" then
+					pcall(function() client:_bindCharacter(character) end)
+				end
+				return client:Parry()
+			end)
+			if ok and result ~= false then
+				E.LastSuccess = tick()
+				E.CDUntil = tick() + (E.FlagWorks and 0.3 or E.GetCD(client))
+				return true
+			end
+			return false
+		end
+
+		local fallbackOk, fallbackFired = pcall(KINON_TryFallbackParry)
+		if fallbackOk and fallbackFired then
+			E.LastSuccess = tick()
+			E.CDUntil = tick() + math.max(E.GetCD(nil), 1.0)
+			return true
+		end
+		return false
+	end
+
+	function E.HandleV2(animTrack, model)
+		if not ParryV2.Enabled or not animTrack or not model or not model.Parent then return end
+		local animationId = KINON_AnimationId(animTrack)
+		if animationId == "" or KINON_IgnoredParryAnimationIds[animationId] then return end
+		if VD_NO_PARRY_ANIMS[animationId] then return end
+
+		local modelName = string.lower(tostring(model.Name or ""))
+		if modelName:find("veil", 1, true) then
+			local label = ""
+			pcall(function()
+				label = string.lower(tostring(animTrack.Name or "") .. " " .. tostring(animTrack.Animation and animTrack.Animation.Name or ""))
+			end)
+			if label:find("spear", 1, true) or label:find("throw", 1, true) or label:find("charge", 1, true) then return end
+		end
+
+		local optionalAttack = VD_OPTIONAL_ATTACK_ANIMS[animationId]
+		if optionalAttack and VD_SkipParryOptions[animationId] == true then return end
+		local knownAttack = KINON_KillerAttackIds[animationId] == true
+			or (optionalAttack ~= nil and optionalAttack.Default == true)
+		if not knownAttack then return end
+
+		local okTime, timePosition = pcall(function() return animTrack.TimePosition or 0 end)
+		if okTime and timePosition > 0.45 then return end
+		local isLunge = KINON_LungeAnimationIds[animationId] == true
+
+		task.spawn(function()
+			local startTime = tick()
+			local lastPos, lastT, vel
+			repeat
+				if unloaded or not ParryV2.Enabled or not animTrack.IsPlaying then break end
+				local currentTime = 0
+				pcall(function() currentTime = animTrack.TimePosition or 0 end)
+				if currentTime > 0.45 then break end
+				local playerRoot = getRoot()
+				local killerRoot = model:FindFirstChild("HumanoidRootPart")
+				if killerRoot then
+					local nowT = tick()
+					local pos = killerRoot.Position
+					if lastPos and nowT > lastT then
+						local v = (pos - lastPos) / (nowT - lastT)
+						vel = vel and (vel * 0.5 + v * 0.5) or v
+					end
+					lastPos, lastT = pos, nowT
+				end
+				if playerRoot and killerRoot
+					and KINON_ParryInRange(killerRoot, playerRoot, vel or killerRoot.AssemblyLinearVelocity, isLunge, optionalAttack ~= nil) then
+					if E.V2TryParry("Animation " .. animationId, killerRoot) then return end
+				end
+				RunService.Heartbeat:Wait()
+			until tick() - startTime >= 0.45
+		end)
+	end
+end
+
 local function KINON_HandleAttackTrack(animTrack, model)
 	if not (Parry.Enabled or ParryV2.Enabled) or not animTrack or not model or not model.Parent then return end
+	if ParryV2.Enabled and not Parry.Enabled then return KINON_ParryEngine.HandleV2(animTrack, model) end
 	local animationId = KINON_AnimationId(animTrack)
 	if animationId == "" or KINON_IgnoredParryAnimationIds[animationId] then return end
 	if VD_NO_PARRY_ANIMS[animationId] then return end
