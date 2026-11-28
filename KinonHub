@@ -4423,7 +4423,7 @@ end
 
 State.CameraSettings = {
 	Enabled = false,
-	ZoomOn = true, Zoom = 1000,
+	ZoomOn = true, Zoom = 5000,
 	FOVOn = false, FOV = 70,
 	StiffOn = false, Stiff = 3,
 	StretchOn = false, Stretch = 5,
@@ -4432,27 +4432,141 @@ State.CameraSettings = {
 State.CameraObj = (function()
 	local S = State.CameraSettings
 	local M = {
-		OriginalFOV = nil, OriginalZoom = nil, OriginalMinZoom = nil,
+		OriginalFOV = nil,
+		OriginalZoom = nil, OriginalMinZoom = nil, OriginalCameraMode = nil,
+		ZoomDistance = nil, ZoomConnections = {}, _zoomActive = false, _lastPinch = 1,
 		StiffnessFocus = nil, Dead = false,
 		_fovCam = nil, _fovConn = nil, _bound = false,
 	}
+
+	local ZOOM_MIN, ZOOM_STEP, ZOOM_MAX = 0.5, 1.15, 5000
 
 	local function wantZoom() return S.Enabled and S.ZoomOn end
 	local function wantFOV() return S.Enabled and S.FOVOn end
 	local function wantStiff() return S.Enabled and S.StiffOn end
 	local function wantStretch() return S.Enabled and S.StretchOn end
 
-	local function applyZoom()
+	local function getZoomLimit()
+		return math.clamp(tonumber(S.Zoom) or ZOOM_MAX, 50, ZOOM_MAX)
+	end
+
+	local function focusPosition(cam)
+		local focus = cam.Focus.Position
+		if (focus - cam.CFrame.Position).Magnitude > 4000 then
+			local char = LP.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if root then return root.Position + Vector3.new(0, 1.5, 0) end
+		end
+		return focus
+	end
+
+	local function applyZoomLimits()
+		pcall(function()
+			if LP.CameraMaxZoomDistance < 1e5 then
+				LP.CameraMaxZoomDistance = 1e5
+			end
+			if LP.CameraMinZoomDistance > ZOOM_MIN then
+				LP.CameraMinZoomDistance = ZOOM_MIN
+			end
+			if LP.CameraMode == Enum.CameraMode.LockFirstPerson then
+				LP.CameraMode = Enum.CameraMode.Classic
+			end
+		end)
+	end
+
+	local function zoomOut(factor)
+		local cam = workspace.CurrentCamera
+		if not cam then return end
+		local base = (cam.CFrame.Position - focusPosition(cam)).Magnitude
+		if M.ZoomDistance == nil or M.ZoomDistance < base then
+			M.ZoomDistance = base
+		end
+		M.ZoomDistance = math.clamp(M.ZoomDistance * factor, ZOOM_MIN, getZoomLimit())
+	end
+
+	local function addZoomConnection(conn)
+		table.insert(M.ZoomConnections, conn)
+	end
+
+	local function disconnectZoomInput()
+		for _, conn in ipairs(M.ZoomConnections) do
+			pcall(function() conn:Disconnect() end)
+		end
+		table.clear(M.ZoomConnections)
+		M.ZoomDistance = nil
+		M._lastPinch = 1
+	end
+
+	local function connectZoomInput()
+		if #M.ZoomConnections > 0 then return end
+
+		addZoomConnection(UserInputService.InputChanged:Connect(function(input, processed)
+			if processed or unloaded or M.Dead or not wantZoom() then return end
+			if input.UserInputType == Enum.UserInputType.MouseWheel then
+				if input.Position.Z > 0 then
+					zoomOut(1 / ZOOM_STEP)
+				else
+					zoomOut(ZOOM_STEP)
+				end
+			end
+		end))
+
+		addZoomConnection(UserInputService.TouchPinch:Connect(function(_, scale, _, state, processed)
+			if processed or unloaded or M.Dead or not wantZoom() then return end
+			if state == Enum.UserInputState.Begin then
+				M._lastPinch = 1
+			elseif state == Enum.UserInputState.Change and scale > 0 and M._lastPinch > 0 then
+				local ratio = scale / M._lastPinch
+				M._lastPinch = scale
+				zoomOut(1 / ratio)
+			end
+		end))
+
+		for _, prop in ipairs({ "CameraMaxZoomDistance", "CameraMinZoomDistance", "CameraMode" }) do
+			addZoomConnection(LP:GetPropertyChangedSignal(prop):Connect(function()
+				if wantZoom() then applyZoomLimits() end
+			end))
+		end
+	end
+
+	local function syncZoom()
 		if wantZoom() then
-			if M.OriginalZoom == nil then
+			if not M._zoomActive then
 				M.OriginalZoom = LP.CameraMaxZoomDistance
 				M.OriginalMinZoom = LP.CameraMinZoomDistance
+				M.OriginalCameraMode = LP.CameraMode
+				M._zoomActive = true
+				connectZoomInput()
 			end
-			local z = math.clamp(tonumber(S.Zoom) or 1000, 50, 100000)
-			if LP.CameraMaxZoomDistance ~= z then LP.CameraMaxZoomDistance = z end
-		elseif M.OriginalZoom ~= nil then
-			LP.CameraMaxZoomDistance = M.OriginalZoom
-			M.OriginalZoom, M.OriginalMinZoom = nil, nil
+			applyZoomLimits()
+		elseif M._zoomActive then
+			disconnectZoomInput()
+			pcall(function()
+				if M.OriginalZoom ~= nil then LP.CameraMaxZoomDistance = M.OriginalZoom end
+				if M.OriginalMinZoom ~= nil then LP.CameraMinZoomDistance = M.OriginalMinZoom end
+				if M.OriginalCameraMode ~= nil then LP.CameraMode = M.OriginalCameraMode end
+			end)
+			M.OriginalZoom, M.OriginalMinZoom, M.OriginalCameraMode = nil, nil, nil
+			M._zoomActive = false
+		end
+	end
+
+	local function stepZoom()
+		if not wantZoom() then return end
+		applyZoomLimits()
+
+		local cam = workspace.CurrentCamera
+		if not cam or M.ZoomDistance == nil then return end
+
+		local focus = focusPosition(cam)
+		local base = (cam.CFrame.Position - focus).Magnitude
+		M.ZoomDistance = math.clamp(M.ZoomDistance, ZOOM_MIN, getZoomLimit())
+
+		if M.ZoomDistance <= base + 0.05 then
+			M.ZoomDistance = nil
+		else
+			local look = cam.CFrame.LookVector
+			cam.CFrame = CFrame.new(focus - look * M.ZoomDistance) * cam.CFrame.Rotation
 		end
 	end
 
@@ -4532,14 +4646,14 @@ State.CameraObj = (function()
 			if M.Dead then return end
 			pcall(watchCamera)
 			pcall(applyFOV)
-			pcall(applyZoom)
+			pcall(stepZoom)
 		end)
 	end
 
 	function M:Sync()
 		if self.Dead then return end
 		bind()
-		pcall(applyZoom)
+		pcall(syncZoom)
 		pcall(applyFOV)
 		if not wantStiff() then self.StiffnessFocus = nil end
 	end
@@ -4547,7 +4661,7 @@ State.CameraObj = (function()
 	function M:Destroy()
 		self.Dead = true
 		S.Enabled = false
-		pcall(applyZoom)
+		pcall(syncZoom)
 		pcall(applyFOV)
 		if self._fovConn then pcall(function() self._fovConn:Disconnect() end); self._fovConn = nil end
 		pcall(function() RunService:UnbindFromRenderStep("Kinon_CameraStiffness") end)
@@ -14641,8 +14755,8 @@ do
 	addCheckbox(card, "Unlimited Zoom", "scan",
 		function() return s.ZoomOn end,
 		function(v) s.ZoomOn = v; cam:Sync() end)
-	addSlider(card, "Max Zoom", "ruler", 50, 2000,
-		function() return math.clamp(math.floor(tonumber(s.Zoom) or 1000), 50, 2000) end,
+	addSlider(card, "Max Zoom", "ruler", 50, 5000,
+		function() return math.clamp(math.floor(tonumber(s.Zoom) or 5000), 50, 5000) end,
 		function(v) s.Zoom = v; cam:Sync() end)
 	addCheckbox(card, "Custom FOV", "eye",
 		function() return s.FOVOn end,
